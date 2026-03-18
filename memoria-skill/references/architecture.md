@@ -85,21 +85,27 @@ src/
 - [x] Ebbinghaus decay (strength + stability)
 - [x] MCP server with four tools
 - [x] Basic recall by strength ranking
-- [ ] Semantic search via embeddings (requires embedding model)
+- [x] Semantic search via embeddings (nomic-embed-text on Ollama)
+- [x] REM processing engine (launchd, catches up on wake)
+- [x] Remote MCP transport (HTTPS with Tailscale Funnel, --port/--no-tls flags)
+- [x] Memoria skill (SKILL.md with progressive disclosure instructions)
+- [x] Entity-based recall filtering
+- [x] Database migration for embedding column on existing stores
 - [ ] Relational entity graph with proximity tiers
 
 ### Next
-- [ ] Hebbian consolidation (co-accessed memories merge)
-- [ ] REM processing engine (overnight cron, Rust binary for decay/consolidation/reindex)
-- [ ] Reflection service (Claude Code via cron, covered by Max subscription)
-- [ ] Circadian cycle (daytime reflection, overnight REM)
-- [ ] Deploy to Memoria server (M1 Pro MBP via Tailscale)
+- [ ] Hebbian co-activation tracking (record which memories are recalled together)
+- [ ] Hebbian consolidation in REM (merge co-activated memories overnight)
+- [ ] Subconscious layer (lightweight model on interval, thinking about thinking)
+- [ ] Reflection service via cron (Claude Code, covered by Max subscription)
+- [ ] Deploy to Memoria server (M1 Pro MBP, Ollama, persistent store)
+- [ ] Eval iteration — conversational test scenarios for instruction refinement
 
 ### Future
-- [ ] Embedding-based semantic recall (associative, not just strength-ranked)
 - [ ] Relational graph — entities with proximity tiers (Tier 0-3)
-- [ ] Remote MCP for Web/Mobile/Desktop access
+- [ ] Orientation auto-evolution (reflection distils episodes → semantics → orientation)
 - [ ] Cross-conversation entity orientation
+- [ ] Misremembering benchmark (reconstruction through association, not perfect recall)
 
 ## The User
 
