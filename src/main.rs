@@ -198,12 +198,14 @@ impl MemoriaServer {
         }
 
         // Record co-activation — memories surfaced together strengthen their bond
-        let all_recalled_ids: Vec<&str> = orientation
+        // Exclude orientation memories: they load every time, so their co-occurrence
+        // with everything is noise, not signal. Only episodic/semantic pairings matter.
+        let non_orientation_ids: Vec<&str> = active_memories
             .iter()
-            .chain(active_memories.iter())
+            .filter(|m| m.memory_type != MemoryType::Orientation)
             .map(|m| m.id.as_str())
             .collect();
-        let _ = store.record_co_activation(&all_recalled_ids);
+        let _ = store.record_co_activation(&non_orientation_ids);
 
         let (ep_count, sem_count, ori_count) = store.count_by_type().unwrap_or((0, 0, 0));
 
