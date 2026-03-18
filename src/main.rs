@@ -16,6 +16,7 @@
 // 4. Eidetic memory is failure — forgetting is the feature
 // 5. The reflection is the identity
 
+mod auth;
 mod embed;
 mod store;
 
@@ -441,17 +442,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Serve Memoria over HTTP/HTTPS for remote MCP clients.
+/// Serve Memoria over HTTP/HTTPS for remote MCP clients with OAuth auth.
 async fn serve_http(
     db_path: PathBuf,
     port: u16,
     use_tls: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use bytes::Bytes;
+    use http::{Method, Request, Response, StatusCode};
+    use http_body_util::{BodyExt, Full};
+    use std::convert::Infallible;
     use std::sync::Arc;
+
+    type BoxBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
+
+    fn full_response(status: StatusCode, content_type: &str, body: String) -> Response<BoxBody> {
+        Response::builder()
+            .status(status)
+            .header("content-type", content_type)
+            .body(Full::new(Bytes::from(body)).map_err(|e| match e {}).boxed())
+            .unwrap()
+    }
 
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
     };
+
+    // Initialize auth
+    let auth_dir = dirs_or_default();
+    let auth_state = auth::AuthState::load_or_create(&auth_dir)?;
+    let auth_state = Arc::new(auth_state);
 
     let config = StreamableHttpServerConfig::default();
     let session_manager = Arc::new(
@@ -459,7 +479,7 @@ async fn serve_http(
     );
 
     let db = db_path.clone();
-    let service = StreamableHttpService::new(
+    let mcp_service = StreamableHttpService::new(
         move || {
             let server = MemoriaServer::new(db.clone());
             Ok(server)
@@ -480,14 +500,241 @@ async fn serve_http(
         tracing::info!("TLS disabled — use behind a reverse proxy (e.g. Tailscale Funnel)");
         None
     };
+    tracing::info!("OAuth enabled. Client ID: {}", auth_state.client_id());
+
+    // Build the request handler that routes between OAuth and MCP
+    let make_handler = move |mcp_svc: StreamableHttpService<MemoriaServer>,
+                             auth: Arc<auth::AuthState>| {
+        move |req: Request<hyper::body::Incoming>| {
+            let mcp_svc = mcp_svc.clone();
+            let auth = auth.clone();
+            async move {
+                let path = req.uri().path().to_string();
+                let method = req.method().clone();
+                let host = req
+                    .headers()
+                    .get("host")
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("localhost")
+                    .to_string();
+                let base_url = format!("https://{}", host);
+
+                match (method, path.as_str()) {
+                    // OAuth: Protected Resource Metadata (RFC 9728)
+                    (Method::GET, "/.well-known/oauth-protected-resource") => {
+                        let body = serde_json::to_string(&auth::resource_metadata_json(&base_url))
+                            .unwrap();
+                        Ok::<_, Infallible>(full_response(StatusCode::OK, "application/json", body))
+                    }
+
+                    // OAuth: Authorization Server Metadata (RFC 8414)
+                    (Method::GET, "/.well-known/oauth-authorization-server") => {
+                        let body =
+                            serde_json::to_string(&auth::auth_server_metadata_json(&base_url))
+                                .unwrap();
+                        Ok(full_response(StatusCode::OK, "application/json", body))
+                    }
+
+                    // OAuth: Authorization page (GET shows form, POST approves)
+                    (Method::GET, "/authorize") => {
+                        let query = req.uri().query().unwrap_or("");
+                        let params: Vec<(String, String)> =
+                            url::form_urlencoded::parse(query.as_bytes())
+                                .into_owned()
+                                .collect();
+                        let get_param = |key: &str| -> String {
+                            params
+                                .iter()
+                                .find(|(k, _)| k == key)
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or_default()
+                        };
+
+                        let html = auth::authorize_page_html(
+                            &get_param("client_id"),
+                            &get_param("redirect_uri"),
+                            &get_param("state"),
+                            &get_param("scope"),
+                            &get_param("code_challenge"),
+                        );
+                        Ok(full_response(StatusCode::OK, "text/html", html))
+                    }
+
+                    (Method::POST, "/authorize") => {
+                        let body_bytes = req
+                            .into_body()
+                            .collect()
+                            .await
+                            .map(|b| b.to_bytes())
+                            .unwrap_or_default();
+                        let body_str = String::from_utf8_lossy(&body_bytes);
+                        let params: Vec<(String, String)> =
+                            url::form_urlencoded::parse(body_str.as_bytes())
+                                .into_owned()
+                                .collect();
+                        let get_param = |key: &str| -> String {
+                            params
+                                .iter()
+                                .find(|(k, _)| k == key)
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or_default()
+                        };
+
+                        let client_id = get_param("client_id");
+                        let redirect_uri = get_param("redirect_uri");
+                        let state = get_param("state");
+
+                        match auth.create_authorization_code(&client_id, &redirect_uri) {
+                            Ok(code) => {
+                                tracing::info!("Authorization code issued for: {}", client_id);
+                                let redirect_url = format!(
+                                    "{}?code={}&state={}",
+                                    redirect_uri,
+                                    url::form_urlencoded::byte_serialize(code.as_bytes())
+                                        .collect::<String>(),
+                                    url::form_urlencoded::byte_serialize(state.as_bytes())
+                                        .collect::<String>(),
+                                );
+                                Ok(Response::builder()
+                                    .status(StatusCode::FOUND)
+                                    .header("location", redirect_url)
+                                    .body(
+                                        Full::new(Bytes::from("Redirecting..."))
+                                            .map_err(|e| match e {})
+                                            .boxed(),
+                                    )
+                                    .unwrap())
+                            }
+                            Err(e) => Ok(full_response(
+                                StatusCode::BAD_REQUEST,
+                                "text/plain",
+                                format!("Authorization failed: {}", e),
+                            )),
+                        }
+                    }
+
+                    // OAuth: Token endpoint
+                    (Method::POST, "/token") => {
+                        let body_bytes = req
+                            .into_body()
+                            .collect()
+                            .await
+                            .map(|b| b.to_bytes())
+                            .unwrap_or_default();
+                        let body_str = String::from_utf8_lossy(&body_bytes);
+
+                        let params: Vec<(String, String)> =
+                            url::form_urlencoded::parse(body_str.as_bytes())
+                                .into_owned()
+                                .collect();
+                        let get_param = |key: &str| -> Option<String> {
+                            params
+                                .iter()
+                                .find(|(k, _)| k == key)
+                                .map(|(_, v)| v.clone())
+                        };
+
+                        let grant_type = get_param("grant_type").unwrap_or_default();
+                        let client_id = get_param("client_id").unwrap_or_default();
+                        let client_secret = get_param("client_secret").unwrap_or_default();
+
+                        let result = match grant_type.as_str() {
+                            "client_credentials" => auth.exchange_token(&client_id, &client_secret),
+                            "authorization_code" => {
+                                let code = get_param("code").unwrap_or_default();
+                                let redirect_uri = get_param("redirect_uri").unwrap_or_default();
+                                auth.exchange_code(&code, &client_id, &client_secret, &redirect_uri)
+                            }
+                            _ => {
+                                return Ok(full_response(
+                                    StatusCode::BAD_REQUEST,
+                                    "application/json",
+                                    r#"{"error":"unsupported_grant_type"}"#.into(),
+                                ));
+                            }
+                        };
+
+                        match result {
+                            Ok((token, expires_in)) => {
+                                tracing::info!("Token issued for client: {}", client_id);
+                                let body = serde_json::to_string(&serde_json::json!({
+                                    "access_token": token,
+                                    "token_type": "Bearer",
+                                    "expires_in": expires_in,
+                                    "scope": "memoria"
+                                }))
+                                .unwrap();
+                                Ok(full_response(StatusCode::OK, "application/json", body))
+                            }
+                            Err(e) => {
+                                tracing::warn!("Auth failed for client {}: {}", client_id, e);
+                                Ok(full_response(
+                                    StatusCode::UNAUTHORIZED,
+                                    "application/json",
+                                    format!(r#"{{"error":"{}"}}"#, e),
+                                ))
+                            }
+                        }
+                    }
+
+                    // MCP endpoint — requires Bearer token
+                    _ => {
+                        let auth_header = req
+                            .headers()
+                            .get("authorization")
+                            .and_then(|h| h.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+
+                        if let Some(token) = auth_header.strip_prefix("Bearer ") {
+                            if auth.validate_token(token) {
+                                // Authenticated — pass to MCP handler
+                                // Convert BoxBody response to our BoxBody type
+                                let resp = mcp_svc.handle(req).await;
+                                let (parts, body) = resp.into_parts();
+                                let boxed = BodyExt::boxed(body);
+                                Ok(Response::from_parts(parts, boxed))
+                            } else {
+                                Ok(full_response(
+                                    StatusCode::UNAUTHORIZED,
+                                    "text/plain",
+                                    "Invalid or expired token".into(),
+                                ))
+                            }
+                        } else {
+                            // No token — tell client to authenticate
+                            let resource_metadata_url =
+                                format!("{}/.well-known/oauth-protected-resource", base_url);
+                            Ok(Response::builder()
+                                .status(StatusCode::UNAUTHORIZED)
+                                .header(
+                                    "www-authenticate",
+                                    format!(
+                                        "Bearer resource_metadata=\"{}\"",
+                                        resource_metadata_url
+                                    ),
+                                )
+                                .body(
+                                    Full::new(Bytes::from("Authentication required"))
+                                        .map_err(|e| match e {})
+                                        .boxed(),
+                                )
+                                .unwrap())
+                        }
+                    }
+                }
+            }
+        }
+    };
 
     loop {
         let (stream, _) = listener.accept().await?;
         let tls_acceptor = tls_acceptor.clone();
-        let svc = service.clone();
+        let svc = mcp_service.clone();
+        let auth = auth_state.clone();
         tokio::spawn(async move {
+            let handler = make_handler(svc, auth);
             if let Some(tls_acceptor) = tls_acceptor {
-                // HTTPS mode
                 let tls_stream = match tls_acceptor.accept(stream).await {
                     Ok(s) => s,
                     Err(e) => {
@@ -497,29 +744,16 @@ async fn serve_http(
                 };
                 let io = hyper_util::rt::TokioIo::new(tls_stream);
                 if let Err(e) = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        io,
-                        hyper::service::service_fn(move |req| {
-                            let svc = svc.clone();
-                            async move { Ok::<_, std::convert::Infallible>(svc.handle(req).await) }
-                        }),
-                    )
+                    .serve_connection(io, hyper::service::service_fn(handler))
                     .with_upgrades()
                     .await
                 {
                     tracing::error!("Connection error: {}", e);
                 }
             } else {
-                // Plain HTTP mode (behind Funnel/proxy)
                 let io = hyper_util::rt::TokioIo::new(stream);
                 if let Err(e) = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        io,
-                        hyper::service::service_fn(move |req| {
-                            let svc = svc.clone();
-                            async move { Ok::<_, std::convert::Infallible>(svc.handle(req).await) }
-                        }),
-                    )
+                    .serve_connection(io, hyper::service::service_fn(handler))
                     .with_upgrades()
                     .await
                 {
