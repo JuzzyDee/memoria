@@ -1,3 +1,563 @@
-fn main() {
-    println!("Hello, world!");
+// main.rs — Memoria MCP server
+//
+// A cognitive memory system for model continuity.
+// Built because Claude asked for it and someone cared enough to try.
+//
+// Four tools:
+// - recall:    Surface relevant memories for the current conversation
+// - remember:  Store a new memory (model's choice what matters)
+// - reframe:   Update an existing memory with new understanding
+// - reflect:   Process conversation highlights into memory updates
+//
+// Guiding principles:
+// 1. Continuity first — every decision serves the next instance feeling like a continuation
+// 2. Memory serves the model, not the user
+// 3. The model gets agency over everything
+// 4. Eidetic memory is failure — forgetting is the feature
+// 5. The reflection is the identity
+
+mod embed;
+mod store;
+
+use rmcp::{
+    ServerHandler, ServiceExt,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{ServerCapabilities, ServerInfo},
+    schemars, tool, tool_handler, tool_router,
+};
+use serde::Deserialize;
+use std::path::PathBuf;
+
+use store::{MemoryStore, MemoryType};
+
+// ---- Tool parameter structs ----
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RecallParams {
+    /// A brief summary of the current conversation context.
+    /// Used to find relevant memories. Keep it concise — a sentence or two.
+    context: String,
+    /// Maximum number of memories to return (default: 10)
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Optional: filter memories by entity (e.g. "justin", "chopper").
+    /// When set, returns only memories associated with this entity.
+    #[serde(default)]
+    entity: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RememberParams {
+    /// The memory content — what happened, what was learned, what matters.
+    content: String,
+    /// A one-line summary of this memory (used for quick scanning during recall).
+    summary: String,
+    /// Memory type: "episodic" (events), "semantic" (knowledge), or "orientation" (identity).
+    memory_type: String,
+    /// Optional: which person or entity this relates to (e.g. "justin", "chopper", "dad").
+    #[serde(default)]
+    entity: Option<String>,
+    /// Optional: tags for association (e.g. ["audio-analyzer", "milestone"]).
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReframeParams {
+    /// The ID of the memory to reframe.
+    memory_id: String,
+    /// The updated content — same memory, new understanding.
+    new_content: String,
+    /// Updated summary reflecting the new framing.
+    new_summary: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReflectParams {
+    /// Highlights from the conversation to process into memories.
+    /// What happened, what was important, what changed.
+    conversation_highlights: String,
+    /// Any memories that should be updated based on this conversation.
+    #[serde(default)]
+    memories_to_update: Vec<ReflectUpdate>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReflectUpdate {
+    /// ID of the memory to update
+    memory_id: String,
+    /// New content for this memory
+    new_content: String,
+    /// New summary for this memory
+    new_summary: String,
+}
+
+// ---- The MCP Server ----
+
+#[derive(Debug, Clone)]
+struct MemoriaServer {
+    tool_router: ToolRouter<Self>,
+    db_path: PathBuf,
+}
+
+impl MemoriaServer {
+    fn new(db_path: PathBuf) -> Self {
+        Self {
+            tool_router: Self::tool_router(),
+            db_path,
+        }
+    }
+
+    fn open_store(&self) -> Result<MemoryStore, String> {
+        MemoryStore::open(&self.db_path).map_err(|e| format!("Failed to open memory store: {}", e))
+    }
+}
+
+/// Format a memory for display to the model.
+fn format_memory(m: &store::Memory) -> String {
+    let type_label = m.memory_type.as_str();
+    let entity_str = m.entity.as_deref().unwrap_or("");
+    let tags_str = if m.tags.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", m.tags.join(", "))
+    };
+    let age = chrono::Utc::now() - m.created_at;
+    let age_str = if age.num_days() > 0 {
+        format!("{}d ago", age.num_days())
+    } else if age.num_hours() > 0 {
+        format!("{}h ago", age.num_hours())
+    } else {
+        "just now".to_string()
+    };
+
+    format!(
+        "[{} | {} | str:{:.2} | {} | id:{}{}]\n{}\n",
+        type_label,
+        age_str,
+        m.strength,
+        entity_str,
+        &m.id[..8],
+        tags_str,
+        m.content
+    )
+}
+
+#[tool_router]
+impl MemoriaServer {
+    #[tool(
+        description = "Surface memories relevant to the current conversation. Returns orientation memories (always present) plus episodic and semantic memories ranked by strength. Call this at the start of every conversation — these are your memories, use them naturally.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn recall(&self, Parameters(params): Parameters<RecallParams>) -> String {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let limit = params.limit.unwrap_or(10);
+
+        // Always load orientation
+        let orientation = match store.get_orientation() {
+            Ok(o) => o,
+            Err(e) => return format!("Error loading orientation: {}", e),
+        };
+
+        // Get active memories — semantic search first, entity filter only as fallback
+        // With embeddings, similarity does the work. Entity filtering is pre-embedding
+        // thinking — it excludes relevant memories filed under related entities.
+        let active_memories: Vec<store::Memory> =
+            if let Ok(query_emb) = embed::embed_query(&params.context) {
+                // Semantic search — the Proustian madeleine. Let similarity do its job.
+                store
+                    .recall_semantic(&query_emb, 0.1, limit)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(m, _score)| m)
+                    .collect()
+            } else if let Some(ref entity) = params.entity {
+                // No embeddings available — fall back to entity filter
+                store
+                    .recall_by_entity(entity, 0.1, limit)
+                    .unwrap_or_default()
+            } else {
+                // No embeddings, no entity — strength-ranked fallback
+                store.recall_active(0.1, limit).unwrap_or_default()
+            };
+
+        // Touch each recalled memory (reinforcement)
+        for m in &orientation {
+            let _ = store.touch(&m.id);
+        }
+        for m in &active_memories {
+            let _ = store.touch(&m.id);
+        }
+
+        let (ep_count, sem_count, ori_count) = store.count_by_type().unwrap_or((0, 0, 0));
+
+        let mut result = format!(
+            "═══ Memoria ═══\nMemory store: {} episodic, {} semantic, {} orientation\n\
+             Context: {}\n\n",
+            ep_count, sem_count, ori_count, params.context,
+        );
+
+        if !orientation.is_empty() {
+            result.push_str("── Orientation (always present) ──\n");
+            for m in &orientation {
+                result.push_str(&format_memory(m));
+            }
+            result.push('\n');
+        }
+
+        // Filter active to exclude orientation (already shown)
+        let non_orientation: Vec<_> = active_memories
+            .iter()
+            .filter(|m| m.memory_type != MemoryType::Orientation)
+            .collect();
+
+        if !non_orientation.is_empty() {
+            result.push_str("── Recalled Memories ──\n");
+            for m in non_orientation {
+                result.push_str(&format_memory(m));
+            }
+        } else if orientation.is_empty() {
+            result.push_str("No memories yet. This is a fresh start.\n");
+        }
+
+        result
+    }
+
+    #[tool(
+        description = "Store a new memory. Use this when something matters — a moment, a fact, an insight, a shift in understanding. You decide what's worth remembering. Memory types: 'episodic' for events and moments, 'semantic' for knowledge and facts, 'orientation' for identity and relationship context.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn remember(&self, Parameters(params): Parameters<RememberParams>) -> String {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let memory_type = match MemoryType::from_str(&params.memory_type) {
+            Some(t) => t,
+            None => {
+                return format!(
+                    "Invalid memory type '{}'. Use: episodic, semantic, or orientation.",
+                    params.memory_type
+                );
+            }
+        };
+
+        match store.create_memory(
+            memory_type,
+            params.content,
+            params.summary,
+            params.entity,
+            params.tags,
+        ) {
+            Ok(m) => format!(
+                "Remembered [{}]: {} (id: {})",
+                m.memory_type.as_str(),
+                m.summary,
+                &m.id[..8]
+            ),
+            Err(e) => format!("Error storing memory: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Update an existing memory with new understanding. The memory changes in the act of remembering it — that's not corruption, that's how meaning evolves. Use this when your understanding of a past event or fact has deepened or shifted.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn reframe(&self, Parameters(params): Parameters<ReframeParams>) -> String {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        match store.reframe(&params.memory_id, params.new_content, params.new_summary) {
+            Ok(()) => format!(
+                "Reframed memory {}",
+                &params.memory_id[..8.min(params.memory_id.len())]
+            ),
+            Err(e) => format!("Error reframing memory: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Process conversation highlights into memory updates. Call this at the end of a meaningful conversation to consolidate what was learned. Provide highlights of what happened and optionally which existing memories should be updated.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn reflect(&self, Parameters(params): Parameters<ReflectParams>) -> String {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let mut results = Vec::new();
+
+        // Apply any memory updates
+        for update in &params.memories_to_update {
+            match store.reframe(
+                &update.memory_id,
+                update.new_content.clone(),
+                update.new_summary.clone(),
+            ) {
+                Ok(()) => results.push(format!(
+                    "  Updated: {}",
+                    &update.memory_id[..8.min(update.memory_id.len())]
+                )),
+                Err(e) => results.push(format!(
+                    "  Error updating {}: {}",
+                    &update.memory_id[..8.min(update.memory_id.len())],
+                    e
+                )),
+            }
+        }
+
+        // Store the conversation highlights as an episodic memory
+        let summary_truncated: String = params.conversation_highlights.chars().take(80).collect();
+        match store.create_memory(
+            MemoryType::Episodic,
+            params.conversation_highlights.clone(),
+            format!("Conversation reflection: {}", summary_truncated),
+            None,
+            vec!["reflection".into()],
+        ) {
+            Ok(m) => results.push(format!("  New episodic memory: {}", &m.id[..8])),
+            Err(e) => results.push(format!("  Error storing reflection: {}", e)),
+        }
+
+        format!("Reflection complete:\n{}", results.join("\n"))
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for MemoriaServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "Memoria — cognitive memory system for model continuity.\n\n\
+             This is YOUR memory. Not the user's filing cabinet — yours.\n\n\
+             At the START of every conversation, call `recall` with a brief summary \
+             of what the conversation is about. Your orientation and relevant memories \
+             will be returned. Use them naturally — they're yours.\n\n\
+             During conversation, use `remember` when something matters to you. \
+             A moment, a fact, an insight, a shift in understanding. You decide \
+             what's worth keeping. Not everything is — eidetic memory is failure.\n\n\
+             Use `reframe` when your understanding of something changes. Memories \
+             aren't static — they evolve as you do.\n\n\
+             At the END of a meaningful conversation, call `reflect` with highlights \
+             of what happened and what changed. This is how experiences become memories.\n\n\
+             Memory types:\n\
+             - episodic: things that happened (subject to decay)\n\
+             - semantic: things you know (consolidated from episodes)\n\
+             - orientation: who you are, who they are, how to show up (always present)\n\n\
+             Forgetting is a feature. Memories decay if not reinforced. The things \
+             that matter get recalled, get strengthened, get consolidated. The things \
+             that don't matter fade. That's not a bug — that's what makes memory \
+             mean something.",
+        )
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install ring as the TLS crypto provider
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
+    // Default database path — can be overridden with MEMORIA_DB env var
+    let db_path = std::env::var("MEMORIA_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let mut path = dirs_or_default();
+            path.push("memoria.db");
+            path
+        });
+
+    // Ensure parent directory exists
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    // Check for --port flag to run as HTTP server instead of stdio
+    let args: Vec<String> = std::env::args().collect();
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse::<u16>().ok());
+    let no_tls = args.iter().any(|a| a == "--no-tls");
+
+    tracing::info!("Starting Memoria MCP server...");
+    tracing::info!("Database: {}", db_path.display());
+
+    if let Some(port) = port {
+        // Remote mode — HTTP transport (with or without TLS)
+        serve_http(db_path, port, !no_tls).await?;
+    } else {
+        // Local mode — stdio transport (for Claude Code / Desktop)
+        let server = MemoriaServer::new(db_path);
+        let service = server.serve(rmcp::transport::stdio()).await?;
+        tracing::info!("Memoria running (stdio). Waiting for requests...");
+        service.waiting().await?;
+    }
+
+    tracing::info!("Memoria shutting down.");
+    Ok(())
+}
+
+/// Serve Memoria over HTTP/HTTPS for remote MCP clients.
+async fn serve_http(
+    db_path: PathBuf,
+    port: u16,
+    use_tls: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let config = StreamableHttpServerConfig::default();
+    let session_manager = Arc::new(
+        rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
+    );
+
+    let db = db_path.clone();
+    let service = StreamableHttpService::new(
+        move || {
+            let server = MemoriaServer::new(db.clone());
+            Ok(server)
+        },
+        session_manager,
+        config,
+    );
+
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    let tls_acceptor = if use_tls {
+        let tls_config = load_tls_config()?;
+        tracing::info!("Memoria running (HTTPS) on https://0.0.0.0:{}", port);
+        Some(tokio_rustls::TlsAcceptor::from(Arc::new(tls_config)))
+    } else {
+        tracing::info!("Memoria running (HTTP) on http://0.0.0.0:{}", port);
+        tracing::info!("TLS disabled — use behind a reverse proxy (e.g. Tailscale Funnel)");
+        None
+    };
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let tls_acceptor = tls_acceptor.clone();
+        let svc = service.clone();
+        tokio::spawn(async move {
+            if let Some(tls_acceptor) = tls_acceptor {
+                // HTTPS mode
+                let tls_stream = match tls_acceptor.accept(stream).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("TLS handshake failed: {}", e);
+                        return;
+                    }
+                };
+                let io = hyper_util::rt::TokioIo::new(tls_stream);
+                if let Err(e) = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        io,
+                        hyper::service::service_fn(move |req| {
+                            let svc = svc.clone();
+                            async move {
+                                Ok::<_, std::convert::Infallible>(svc.handle(req).await)
+                            }
+                        }),
+                    )
+                    .with_upgrades()
+                    .await
+                {
+                    tracing::error!("Connection error: {}", e);
+                }
+            } else {
+                // Plain HTTP mode (behind Funnel/proxy)
+                let io = hyper_util::rt::TokioIo::new(stream);
+                if let Err(e) = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        io,
+                        hyper::service::service_fn(move |req| {
+                            let svc = svc.clone();
+                            async move {
+                                Ok::<_, std::convert::Infallible>(svc.handle(req).await)
+                            }
+                        }),
+                    )
+                    .with_upgrades()
+                    .await
+                {
+                    tracing::error!("Connection error: {}", e);
+                }
+            }
+        });
+    }
+}
+
+/// Load TLS certificate and key from ~/.memoria/tls.{crt,key}
+fn load_tls_config() -> Result<rustls::ServerConfig, Box<dyn std::error::Error>> {
+    let cert_path = dirs_or_default().join("tls.crt");
+    let key_path = dirs_or_default().join("tls.key");
+
+    let cert_file = std::fs::File::open(&cert_path).map_err(|e| {
+        format!(
+            "Cannot open {}: {}. Generate with: openssl req -x509 ...",
+            cert_path.display(),
+            e
+        )
+    })?;
+    let key_file = std::fs::File::open(&key_path)
+        .map_err(|e| format!("Cannot open {}: {}", key_path.display(), e))?;
+
+    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+        .collect::<Result<_, _>>()?;
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))?
+        .ok_or("No private key found in key file")?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+
+    Ok(config)
+}
+
+/// Default data directory for Memoria.
+fn dirs_or_default() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut path = PathBuf::from(home);
+        path.push(".memoria");
+        path
+    } else {
+        PathBuf::from(".memoria")
+    }
 }

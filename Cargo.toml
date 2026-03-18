@@ -2,5 +2,40 @@
 name = "memoria"
 version = "0.1.0"
 edition = "2024"
+description = "Cognitive memory system for model continuity"
+license = "MIT"
+
+[[bin]]
+name = "memoria"
+path = "src/main.rs"
+
+[[bin]]
+name = "memoria-rem"
+path = "src/rem.rs"
 
 [dependencies]
+# MCP server
+rmcp = { version = "1.1", features = ["server", "transport-io", "transport-streamable-http-server"] }
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Memory store
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Embeddings
+ureq = { version = "3", features = ["json"] }
+
+# HTTP server (for remote MCP transport)
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
+http-body-util = "0.1"
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
