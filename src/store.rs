@@ -531,6 +531,66 @@ impl MemoryStore {
         Ok(pairs)
     }
 
+    /// Consolidate two memories into a new semantic memory.
+    /// The originals are left intact — they'll decay naturally through Ebbinghaus.
+    /// The consolidated memory inherits the higher stability of the two parents
+    /// and starts at full strength with semantic-level base stability.
+    ///
+    /// Returns the new consolidated memory, or None if either parent is missing.
+    pub fn consolidate(
+        &self,
+        id_a: &str,
+        id_b: &str,
+        merged_content: String,
+        merged_summary: String,
+    ) -> rusqlite::Result<Option<Memory>> {
+        let a = self.get(id_a)?;
+        let b = self.get(id_b)?;
+
+        match (a, b) {
+            (Some(mem_a), Some(mem_b)) => {
+                // Inherit tags from both parents, deduplicated
+                let mut tags: Vec<String> = mem_a.tags.clone();
+                for tag in &mem_b.tags {
+                    if !tags.contains(tag) {
+                        tags.push(tag.clone());
+                    }
+                }
+                tags.push("consolidated".into());
+
+                // Inherit entity if both share the same one, or the one that has it
+                let entity = match (&mem_a.entity, &mem_b.entity) {
+                    (Some(a), Some(b)) if a == b => Some(a.clone()),
+                    (Some(a), None) => Some(a.clone()),
+                    (None, Some(b)) => Some(b.clone()),
+                    _ => None,
+                };
+
+                // Use semantic base stability, boosted by parent access counts
+                let combined_access = mem_a.access_count + mem_b.access_count;
+                let stability =
+                    MemoryType::Semantic.base_stability() * 1.4_f64.powi(combined_access as i32);
+
+                let memory = self.create_memory(
+                    MemoryType::Semantic,
+                    merged_content,
+                    merged_summary,
+                    entity,
+                    tags,
+                )?;
+
+                // Boost the new memory's stability based on parent history
+                self.conn.execute(
+                    "UPDATE memories SET stability = ?1 WHERE id = ?2",
+                    params![stability, memory.id],
+                )?;
+
+                Ok(Some(memory))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Count memories by type.
     pub fn count_by_type(&self) -> rusqlite::Result<(usize, usize, usize)> {
         let episodic: usize = self.conn.query_row(
@@ -892,5 +952,81 @@ mod tests {
         let pairs = store.get_co_activations(1, 10).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].2, 2); // count should be 2, not two separate entries
+    }
+
+    #[test]
+    fn test_consolidate_creates_semantic() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        let m1 = store
+            .create_memory(
+                MemoryType::Episodic,
+                "We built the memory store together".into(),
+                "Building the store".into(),
+                Some("justin".into()),
+                vec!["memoria".into()],
+            )
+            .unwrap();
+        let m2 = store
+            .create_memory(
+                MemoryType::Episodic,
+                "We added embeddings and semantic search".into(),
+                "Adding embeddings".into(),
+                Some("justin".into()),
+                vec!["memoria".into(), "embeddings".into()],
+            )
+            .unwrap();
+
+        let result = store
+            .consolidate(
+                &m1.id,
+                &m2.id,
+                "Built Memoria from store to semantic search in one session".into(),
+                "Consolidated: building + embeddings".into(),
+            )
+            .unwrap();
+
+        assert!(result.is_some());
+        let merged = result.unwrap();
+        assert_eq!(merged.memory_type, MemoryType::Semantic);
+        assert!(merged.tags.contains(&"consolidated".into()));
+        assert!(merged.tags.contains(&"memoria".into()));
+        assert!(merged.tags.contains(&"embeddings".into()));
+        assert_eq!(merged.entity.as_deref(), Some("justin"));
+
+        // Original memories still exist
+        assert!(store.get(&m1.id).unwrap().is_some());
+        assert!(store.get(&m2.id).unwrap().is_some());
+
+        // Now 2 episodic + 1 semantic
+        let (ep, sem, _) = store.count_by_type().unwrap();
+        assert_eq!(ep, 2);
+        assert_eq!(sem, 1);
+    }
+
+    #[test]
+    fn test_consolidate_missing_parent() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        let m1 = store
+            .create_memory(
+                MemoryType::Episodic,
+                "Exists".into(),
+                "Here".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        let result = store
+            .consolidate(
+                &m1.id,
+                "nonexistent-id",
+                "Should fail".into(),
+                "Nope".into(),
+            )
+            .unwrap();
+
+        assert!(result.is_none());
     }
 }

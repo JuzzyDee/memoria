@@ -173,6 +173,99 @@ fn main() {
         }
     }
 
+    // --- Phase 5: Hebbian consolidation ---
+    // Merge memories that have been co-activated enough times.
+    // The REM engine does mechanical merging (concatenation with markers).
+    // The subconscious layer refines these into coherent narratives later.
+    let consolidation_threshold: u32 = std::env::var("MEMORIA_CONSOLIDATION_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+
+    let candidates = store
+        .get_co_activations(consolidation_threshold, 10)
+        .unwrap_or_default();
+
+    if !candidates.is_empty() {
+        println!();
+        println!(
+            "── Hebbian Consolidation (threshold: {}x) ──",
+            consolidation_threshold
+        );
+
+        let mut consolidated = 0;
+        for (id_a, id_b, count) in &candidates {
+            let mem_a = store.get(id_a).ok().flatten();
+            let mem_b = store.get(id_b).ok().flatten();
+
+            if let (Some(a), Some(b)) = (mem_a, mem_b) {
+                // Only consolidate episodic pairs — semantic and orientation
+                // are already at a higher level of abstraction
+                if a.memory_type != store::MemoryType::Episodic
+                    || b.memory_type != store::MemoryType::Episodic
+                {
+                    continue;
+                }
+
+                // Don't consolidate if either is already a consolidation product
+                if a.tags.contains(&"consolidated".to_string())
+                    || b.tags.contains(&"consolidated".to_string())
+                {
+                    continue;
+                }
+
+                let merged_content = format!(
+                    "[Consolidated from {} co-activations — refine in next subconscious pass]\n\n\
+                     --- Memory A: {} ---\n{}\n\n\
+                     --- Memory B: {} ---\n{}",
+                    count, a.summary, a.content, b.summary, b.content
+                );
+                let merged_summary = format!(
+                    "Consolidated: {} + {}",
+                    truncate(&a.summary, 30),
+                    truncate(&b.summary, 30)
+                );
+
+                match store.consolidate(id_a, id_b, merged_content, merged_summary) {
+                    Ok(Some(new_mem)) => {
+                        consolidated += 1;
+                        println!(
+                            "  Merged [{:>3}x]: {} + {} → {}",
+                            count,
+                            &id_a[..8],
+                            &id_b[..8],
+                            &new_mem.id[..8]
+                        );
+                    }
+                    Ok(None) => {
+                        println!(
+                            "  Skipped: {} + {} (parent missing)",
+                            &id_a[..8],
+                            &id_b[..8]
+                        );
+                    }
+                    Err(e) => {
+                        println!(
+                            "  Error consolidating {} + {}: {}",
+                            &id_a[..8],
+                            &id_b[..8],
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        if consolidated > 0 {
+            println!(
+                "Consolidated {} pair(s). Subconscious will refine on next pass.",
+                consolidated
+            );
+        } else {
+            println!("No eligible pairs for consolidation yet.");
+        }
+    }
+
     println!();
     println!("═══ REM complete ═══");
 }
