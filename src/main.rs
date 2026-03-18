@@ -197,6 +197,14 @@ impl MemoriaServer {
             let _ = store.touch(&m.id);
         }
 
+        // Record co-activation — memories surfaced together strengthen their bond
+        let all_recalled_ids: Vec<&str> = orientation
+            .iter()
+            .chain(active_memories.iter())
+            .map(|m| m.id.as_str())
+            .collect();
+        let _ = store.record_co_activation(&all_recalled_ids);
+
         let (ep_count, sem_count, ori_count) = store.count_by_type().unwrap_or((0, 0, 0));
 
         let mut result = format!(
@@ -491,9 +499,7 @@ async fn serve_http(
                         io,
                         hyper::service::service_fn(move |req| {
                             let svc = svc.clone();
-                            async move {
-                                Ok::<_, std::convert::Infallible>(svc.handle(req).await)
-                            }
+                            async move { Ok::<_, std::convert::Infallible>(svc.handle(req).await) }
                         }),
                     )
                     .with_upgrades()
@@ -509,9 +515,7 @@ async fn serve_http(
                         io,
                         hyper::service::service_fn(move |req| {
                             let svc = svc.clone();
-                            async move {
-                                Ok::<_, std::convert::Infallible>(svc.handle(req).await)
-                            }
+                            async move { Ok::<_, std::convert::Infallible>(svc.handle(req).await) }
                         }),
                     )
                     .with_upgrades()
@@ -539,8 +543,8 @@ fn load_tls_config() -> Result<rustls::ServerConfig, Box<dyn std::error::Error>>
     let key_file = std::fs::File::open(&key_path)
         .map_err(|e| format!("Cannot open {}: {}", key_path.display(), e))?;
 
-    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
-        .collect::<Result<_, _>>()?;
+    let certs: Vec<_> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file)).collect::<Result<_, _>>()?;
     let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))?
         .ok_or("No private key found in key file")?;
 

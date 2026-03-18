@@ -150,6 +150,29 @@ fn main() {
         );
     }
 
+    // --- Phase 4: Hebbian co-activation report ---
+    let co_activations = store.get_co_activations(2, 20).unwrap_or_default();
+    if !co_activations.is_empty() {
+        println!();
+        println!("── Hebbian Co-activations ──");
+        println!("Memories frequently recalled together (consolidation candidates):");
+        for (a, b, count) in &co_activations {
+            let summary_a = store
+                .get(a)
+                .ok()
+                .flatten()
+                .map(|m| truncate(&m.summary, 40))
+                .unwrap_or_else(|| a[..8].to_string());
+            let summary_b = store
+                .get(b)
+                .ok()
+                .flatten()
+                .map(|m| truncate(&m.summary, 40))
+                .unwrap_or_else(|| b[..8].to_string());
+            println!("  [{:>3}x] {} ↔ {}", count, summary_a, summary_b);
+        }
+    }
+
     println!();
     println!("═══ REM complete ═══");
 }

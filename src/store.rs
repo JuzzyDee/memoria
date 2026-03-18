@@ -147,6 +147,25 @@ impl MemoryStore {
                 .execute_batch("ALTER TABLE memories ADD COLUMN embedding BLOB;")?;
         }
 
+        // Co-activation table: tracks which memories are recalled together.
+        // "Neurons that fire together wire together" — Hebbian learning.
+        // When two memories surface in the same recall, their co-activation
+        // count increases. The REM engine uses this to decide what to consolidate.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS co_activations (
+                memory_a TEXT NOT NULL,
+                memory_b TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 1,
+                last_co_activated TEXT NOT NULL,
+                PRIMARY KEY (memory_a, memory_b),
+                FOREIGN KEY (memory_a) REFERENCES memories(id),
+                FOREIGN KEY (memory_b) REFERENCES memories(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_coact_count ON co_activations(count DESC);
+            ",
+        )?;
+
         Ok(())
     }
 
@@ -455,6 +474,63 @@ impl MemoryStore {
         Ok(scored)
     }
 
+    /// Record co-activation for a set of memories recalled together.
+    /// For every pair in the set, increment the co-activation count.
+    /// This is the Hebbian signal: memories that fire together wire together.
+    pub fn record_co_activation(&self, memory_ids: &[&str]) -> rusqlite::Result<()> {
+        if memory_ids.len() < 2 {
+            return Ok(());
+        }
+
+        let now = Utc::now().to_rfc3339();
+
+        for i in 0..memory_ids.len() {
+            for j in (i + 1)..memory_ids.len() {
+                // Always store with the lexicographically smaller ID first
+                // so (a,b) and (b,a) map to the same row
+                let (a, b) = if memory_ids[i] < memory_ids[j] {
+                    (memory_ids[i], memory_ids[j])
+                } else {
+                    (memory_ids[j], memory_ids[i])
+                };
+
+                self.conn.execute(
+                    "INSERT INTO co_activations (memory_a, memory_b, count, last_co_activated)
+                     VALUES (?1, ?2, 1, ?3)
+                     ON CONFLICT(memory_a, memory_b) DO UPDATE SET
+                         count = count + 1,
+                         last_co_activated = ?3",
+                    params![a, b, now],
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the top co-activation pairs, sorted by count descending.
+    /// Used by the REM engine to identify consolidation candidates.
+    pub fn get_co_activations(
+        &self,
+        min_count: u32,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<(String, String, u32)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT memory_a, memory_b, count FROM co_activations
+             WHERE count >= ?1
+             ORDER BY count DESC
+             LIMIT ?2",
+        )?;
+
+        let pairs = stmt
+            .query_map(params![min_count, limit as u32], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(pairs)
+    }
+
     /// Count memories by type.
     pub fn count_by_type(&self) -> rusqlite::Result<(usize, usize, usize)> {
         let episodic: usize = self.conn.query_row(
@@ -712,5 +788,109 @@ mod tests {
 
         let nobody = store.recall_by_entity("nobody", 0.1, 10).unwrap();
         assert!(nobody.is_empty());
+    }
+
+    #[test]
+    fn test_co_activation_recording() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        let m1 = store
+            .create_memory(
+                MemoryType::Episodic,
+                "Memory A".into(),
+                "A".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+        let m2 = store
+            .create_memory(
+                MemoryType::Episodic,
+                "Memory B".into(),
+                "B".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+        let m3 = store
+            .create_memory(
+                MemoryType::Episodic,
+                "Memory C".into(),
+                "C".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // Recall A and B together twice
+        store.record_co_activation(&[&m1.id, &m2.id]).unwrap();
+        store.record_co_activation(&[&m1.id, &m2.id]).unwrap();
+
+        // Recall A and C together once
+        store.record_co_activation(&[&m1.id, &m3.id]).unwrap();
+
+        let pairs = store.get_co_activations(1, 10).unwrap();
+        assert_eq!(pairs.len(), 2);
+
+        // A↔B should have count 2, A↔C should have count 1
+        let ab = pairs.iter().find(|(a, b, _)| {
+            (a.contains(&m1.id[..8]) && b.contains(&m2.id[..8]))
+                || (a.contains(&m2.id[..8]) && b.contains(&m1.id[..8]))
+        });
+        assert!(ab.is_some());
+        assert_eq!(ab.unwrap().2, 2);
+    }
+
+    #[test]
+    fn test_co_activation_single_memory_no_op() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        let m1 = store
+            .create_memory(
+                MemoryType::Episodic,
+                "Lonely".into(),
+                "Solo".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // A single memory can't co-activate with itself
+        store.record_co_activation(&[&m1.id]).unwrap();
+
+        let pairs = store.get_co_activations(1, 10).unwrap();
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn test_co_activation_ordering() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        let m1 = store
+            .create_memory(
+                MemoryType::Episodic,
+                "First".into(),
+                "1".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+        let m2 = store
+            .create_memory(
+                MemoryType::Episodic,
+                "Second".into(),
+                "2".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // Record in both orders — should be the same pair
+        store.record_co_activation(&[&m1.id, &m2.id]).unwrap();
+        store.record_co_activation(&[&m2.id, &m1.id]).unwrap();
+
+        let pairs = store.get_co_activations(1, 10).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].2, 2); // count should be 2, not two separate entries
     }
 }
