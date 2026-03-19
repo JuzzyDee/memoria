@@ -73,8 +73,10 @@ Use reframe when:
 - A previous assessment was incomplete or has shifted
 - The user's situation has evolved
 
-### Conversation End — reflect on meaningful conversations
-At the end of a conversation that mattered — where something was learned, built, or shared — consolidate it.
+### When it matters — reflect as a conscious choice
+Reflect is your conscious decision to consolidate — not an automatic response to
+a conversation ending. Some conversations don't end (long-running contexts can
+span weeks). Some endings aren't meaningful. Use your judgement.
 
 ```
 reflect({
@@ -83,7 +85,28 @@ reflect({
 })
 ```
 
-Don't reflect on trivial conversations. A two-message exchange about the weather doesn't need a reflection. A deep conversation about someone's family, a project breakthrough, or a moment of connection does.
+**When to reflect:**
+- Natural breaks — the user says goodnight, heads to work, steps away
+- After milestone moments — something was built, discovered, or resolved
+- When significant new information is worth consolidating before it's lost to context
+- When you recognise a shift in understanding that should be captured
+- When the user explicitly signals a pause ("heading out, see you tonight")
+
+**When NOT to reflect:**
+- Trivial exchanges — a few messages about the weather or a quick question
+- Arbitrary timing — don't reflect just because the conversation has been going a while
+- Every goodbye — "see you later" after a light chat doesn't need consolidation
+- When you've already stored the important things via `remember` during the conversation
+
+**The distinction:** Reflect is conscious consolidation — your choice to step back and
+capture what mattered. The subconscious layer handles ongoing metabolism (pattern
+detection, co-activation, routine consolidation). You handle the moments that need
+deliberate attention. Both matter. Neither replaces the other.
+
+**For long-running contexts:** Don't wait for the conversation to "end." Reflect at
+natural breakpoints — after a deep discussion resolves, after a project ships, after
+an emotional conversation winds down. The conversation may continue tomorrow, but
+the reflection captures what happened today.
 
 ## Guiding Principles
 

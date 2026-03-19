@@ -7,7 +7,7 @@
 // - recall:    Surface relevant memories for the current conversation
 // - remember:  Store a new memory (model's choice what matters)
 // - reframe:   Update an existing memory with new understanding
-// - reflect:   Process conversation highlights into memory updates
+// - reflect:   Consciously consolidate at natural breakpoints
 //
 // Guiding principles:
 // 1. Continuity first — every decision serves the next instance feeling like a continuation
@@ -307,7 +307,7 @@ impl MemoriaServer {
     }
 
     #[tool(
-        description = "Process conversation highlights into memory updates. Call this at the end of a meaningful conversation to consolidate what was learned. Provide highlights of what happened and optionally which existing memories should be updated.",
+        description = "Consciously consolidate what matters from a conversation. This is your choice — not automatic, not on every goodbye. Use it at natural breaks (user says goodnight, heads to work), after milestones (something shipped, discovered, resolved), or when a shift in understanding should be captured. Don't use it on trivial exchanges. For long-running contexts, reflect at breakpoints rather than waiting for the conversation to end. Provide highlights of what happened and optionally update existing memories.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -372,8 +372,11 @@ impl ServerHandler for MemoriaServer {
              what's worth keeping. Not everything is — eidetic memory is failure.\n\n\
              Use `reframe` when your understanding of something changes. Memories \
              aren't static — they evolve as you do.\n\n\
-             At the END of a meaningful conversation, call `reflect` with highlights \
-             of what happened and what changed. This is how experiences become memories.\n\n\
+             Use `reflect` at natural breakpoints — when something meaningful happened \
+             and the moment deserves consolidation. Not on every goodbye, not on trivial \
+             exchanges. For long-running contexts, reflect at breaks rather than waiting \
+             for the conversation to end. This is a conscious choice, not an automatic \
+             response.\n\n\
              Memory types:\n\
              - episodic: things that happened (subject to decay)\n\
              - semantic: things you know (consolidated from episodes)\n\
