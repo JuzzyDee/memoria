@@ -141,7 +141,7 @@ impl AuthState {
             .map_err(|_| "invalid_client")?;
 
         // Generate a Bearer token (HMAC-signed timestamp)
-        let expires_in: u64 = 3600; // 1 hour
+        let expires_in: u64 = 604800; // 7 days — personal server, long-lived tokens
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -253,7 +253,7 @@ impl AuthState {
         drop(codes);
 
         // Generate token (same as client_credentials flow)
-        let expires_in: u64 = 3600;
+        let expires_in: u64 = 604800; // 7 days
         let token = self.generate_token(now);
 
         let mut tokens = self.active_tokens.write().unwrap();
@@ -419,7 +419,7 @@ mod tests {
         // Exchange with correct credentials
         let (token, expires_in) = auth.exchange_token("test-client", secret).unwrap();
         assert!(token.starts_with("mem_"));
-        assert_eq!(expires_in, 3600);
+        assert_eq!(expires_in, 604800);
 
         // Token should be valid
         assert!(auth.validate_token(&token));
