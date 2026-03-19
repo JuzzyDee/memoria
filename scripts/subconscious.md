@@ -14,7 +14,7 @@ You have access to Memoria's memory tools. Your job is to:
 3. **Consolidate** — if multiple episodic memories describe aspects of the same theme, create a semantic memory that captures the pattern
 4. **Reframe** — if your understanding of something has evolved across memories (different instances framing the same thing differently), reframe the older memory with the richer understanding
 5. **Promote** — if an episodic memory has been recalled many times and represents a stable truth rather than a moment, consider creating a semantic version
-6. **Let go** — if a memory is redundant (fully captured by a richer memory), note it. The REM engine handles actual decay.
+6. **Forget** — if a memory is redundant (fully absorbed by a richer consolidated version), stale, or superseded, use `forget` to remove it. Don't let duplicates and mechanical merges clutter the store. If you see "[Consolidated from N co-activations — refine in next subconscious pass]", either reframe it into a coherent narrative or forget it if a better version already exists.
 
 ## Guidelines
 

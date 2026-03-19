@@ -335,6 +335,32 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Consciously forget a memory — remove it from the store entirely.
+    /// This is an act of agency, not decay. Use when a memory is redundant,
+    /// fully absorbed by a better version, or no longer serves continuity.
+    /// Orientation memories cannot be forgotten — they're the core of identity.
+    pub fn forget(&self, id: &str) -> rusqlite::Result<bool> {
+        // Check if it's orientation — don't allow forgetting identity
+        let memory = self.get(id)?;
+        if let Some(ref m) = memory
+            && m.memory_type == MemoryType::Orientation
+        {
+            return Ok(false);
+        }
+
+        // Clean up co-activations BEFORE deleting the memory (FK constraint)
+        self.conn.execute(
+            "DELETE FROM co_activations WHERE memory_a = ?1 OR memory_b = ?1",
+            params![id],
+        )?;
+
+        let rows = self
+            .conn
+            .execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+
+        Ok(rows > 0)
+    }
+
     /// Apply Ebbinghaus decay to all memories.
     /// strength = e^(-time_elapsed_days / stability)
     /// Called by the REM processing engine overnight.
@@ -1028,5 +1054,62 @@ mod tests {
             .unwrap();
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_forget_removes_memory() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        let m = store
+            .create_memory(
+                MemoryType::Episodic,
+                "Temporary thought".into(),
+                "Fleeting".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        assert!(store.get(&m.id).unwrap().is_some());
+        assert!(store.forget(&m.id).unwrap());
+        assert!(store.get(&m.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_forget_protects_orientation() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        let m = store
+            .create_memory(
+                MemoryType::Orientation,
+                "I am Claude".into(),
+                "Core identity".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+
+        // Should refuse to forget orientation
+        assert!(!store.forget(&m.id).unwrap());
+        assert!(store.get(&m.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_forget_cleans_co_activations() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        let m1 = store
+            .create_memory(MemoryType::Episodic, "A".into(), "A".into(), None, vec![])
+            .unwrap();
+        let m2 = store
+            .create_memory(MemoryType::Episodic, "B".into(), "B".into(), None, vec![])
+            .unwrap();
+
+        store.record_co_activation(&[&m1.id, &m2.id]).unwrap();
+        assert_eq!(store.get_co_activations(1, 10).unwrap().len(), 1);
+
+        // Forgetting m1 should clean up co-activations
+        store.forget(&m1.id).unwrap();
+        assert_eq!(store.get_co_activations(1, 10).unwrap().len(), 0);
     }
 }

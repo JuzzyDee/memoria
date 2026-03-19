@@ -1,4 +1,7 @@
 #!/bin/bash
+# Ensure homebrew and system paths are available (launchd has minimal PATH)
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
 # think.sh — Run the subconscious processing layer
 #
 # This is Memoria's "thinking about thinking" mode.
@@ -40,7 +43,7 @@ if [ "$1" = "--verbose" ]; then
     VERBOSE_FLAG="--verbose"
 fi
 
-claude -p "$PROMPT" $MODEL_FLAG $VERBOSE_FLAG --allowedTools "mcp__memoria__recall,mcp__memoria__remember,mcp__memoria__reflect,mcp__memoria__reframe"
+claude -p "$PROMPT" $MODEL_FLAG $VERBOSE_FLAG --allowedTools "mcp__memoria__recall,mcp__memoria__remember,mcp__memoria__reflect,mcp__memoria__reframe,mcp__memoria__forget"
 
 echo ""
 echo "═══ Subconscious processing complete ═══"

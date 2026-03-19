@@ -74,6 +74,14 @@ struct ReframeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ForgetParams {
+    /// The ID of the memory to forget.
+    memory_id: String,
+    /// Brief reason for forgetting — helps the subconscious understand pruning decisions.
+    reason: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ReflectParams {
     /// Highlights from the conversation to process into memories.
     /// What happened, what was important, what changed.
@@ -303,6 +311,41 @@ impl MemoriaServer {
                 &params.memory_id[..8.min(params.memory_id.len())]
             ),
             Err(e) => format!("Error reframing memory: {}", e),
+        }
+    }
+
+    #[tool(
+        description = "Consciously forget a memory. Use when a memory is redundant (fully absorbed by a richer consolidated version), stale (superseded by new understanding), or no longer serves continuity. This is an act of agency — choosing what to let go. Orientation memories cannot be forgotten. Provide a brief reason so the subconscious can learn from pruning patterns.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn forget(&self, Parameters(params): Parameters<ForgetParams>) -> String {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        match store.forget(&params.memory_id) {
+            Ok(true) => {
+                tracing::info!(
+                    "Forgot memory {}: {}",
+                    &params.memory_id[..8.min(params.memory_id.len())],
+                    params.reason
+                );
+                format!(
+                    "Forgot memory {} ({})",
+                    &params.memory_id[..8.min(params.memory_id.len())],
+                    params.reason
+                )
+            }
+            Ok(false) => format!(
+                "Cannot forget {} — either it doesn't exist or it's an orientation memory",
+                &params.memory_id[..8.min(params.memory_id.len())]
+            ),
+            Err(e) => format!("Error forgetting memory: {}", e),
         }
     }
 
