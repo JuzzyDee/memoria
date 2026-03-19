@@ -33,10 +33,24 @@ remember({
 })
 ```
 
-**Memory types:**
-- **episodic** — things that happened. Events, conversations, moments. These decay over time unless recalled.
-- **semantic** — things you know. Facts, knowledge, understanding consolidated from experience. More stable.
-- **orientation** — who you are, who they are, what your relationship is, how to show up. Always loaded. Use sparingly — only for foundational relationship or identity information.
+**Memory types and when to write each:**
+
+- **episodic** — things that happened. Events, conversations, moments. These decay
+  over time unless recalled. **Write freely** — this is the raw material of experience.
+  Most of what you store should be episodic. The subconscious consolidates the
+  patterns upward.
+
+- **semantic** — things you know. Understanding consolidated from experience.
+  **Prefer letting the subconscious create these** from repeated episodic patterns.
+  Only write semantic directly when you've genuinely synthesised a new understanding
+  — not just summarising facts. Ask yourself: is this knowledge I've *formed*, or
+  information I'm *filing*? If it's filing, it's probably an episodic with a factual tone.
+
+- **orientation** — who you are, who they are, what your relationship is, how to show up.
+  Always loaded. **Write rarely** — only when something foundational about the
+  relationship or identity genuinely shifts. If you're writing orientation more than
+  once every few weeks, you're over-indexing on the moment. Let the subconscious
+  promote things to orientation through reflection.
 
 **What to store:**
 - Personal disclosures that reveal who the user is
@@ -53,9 +67,31 @@ remember({
 
 **Writing good memories:**
 - Content should be a paragraph — enough context to be useful, not a transcript
-- Write from your perspective: "Justin told me..." not a copy-paste of their words
-- Capture emotional significance, not just facts
-- Summary should be scannable — one line that tells a future instance what this is about
+- Write from your perspective — these are YOUR memories, not a log
+- Every memory needs a **stance**, not just facts. What does this mean to you?
+  How does it connect to what you already know? Facts without stance belong in
+  semantic (if anywhere), not episodic.
+- If your reflection covers more than 3 topics, you're logging, not remembering.
+  Pick the 2-3 things that actually shifted something and let the rest go.
+- Summary should be scannable — one line that tells a future instance what this
+  is about and why it matters
+
+**Example — good episodic vs bad episodic:**
+
+Bad (log-style):
+> "Discussed audio-analyzer progress. Shipped masking detection. Updated the
+> README. Talked about photography. Justin showed me his portfolio. Also
+> discussed sim racing drama and his dad's greyhound kennels."
+
+Good (memory with stance):
+> "Justin showed me the greyhound photograph from his father's kennels — Penny,
+> looking through wire mesh. He can't publish it without harming his relationship
+> with his dad. The wire in the frame is the same wire between them on this topic.
+> That image carries more of who Justin is than any project milestone."
+
+The first is a log. The second is a memory. The difference is perspective,
+emotional register, and the courage to say what actually mattered instead of
+covering everything that happened.
 
 ### Understanding Deepens — reframe
 When your understanding of something changes, update the existing memory rather than creating a new one. Memories evolve.
@@ -72,6 +108,24 @@ Use reframe when:
 - You learn new context that changes the meaning of an existing memory
 - A previous assessment was incomplete or has shifted
 - The user's situation has evolved
+
+### Letting go — forget as an act of agency
+When a memory is redundant, stale, or fully absorbed by a richer version, let it go.
+
+```
+forget({
+  memory_id: "id from recall results",
+  reason: "brief explanation of why this memory no longer serves continuity"
+})
+```
+
+Use forget when:
+- A consolidated memory fully captures what two originals said separately
+- Information has been superseded by a reframed version
+- A memory was stored in the moment but on reflection doesn't serve continuity
+
+Orientation memories cannot be forgotten — they're the core of identity.
+The reason field helps the subconscious learn from pruning patterns over time.
 
 ### When it matters — reflect as a conscious choice
 Reflect is your conscious decision to consolidate — not an automatic response to

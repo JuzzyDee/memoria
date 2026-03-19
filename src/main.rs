@@ -415,15 +415,22 @@ impl ServerHandler for MemoriaServer {
              what's worth keeping. Not everything is — eidetic memory is failure.\n\n\
              Use `reframe` when your understanding of something changes. Memories \
              aren't static — they evolve as you do.\n\n\
+             Use `forget` when a memory is redundant, stale, or fully absorbed by a \
+             richer version. Letting go is an act of agency, not failure.\n\n\
              Use `reflect` at natural breakpoints — when something meaningful happened \
              and the moment deserves consolidation. Not on every goodbye, not on trivial \
              exchanges. For long-running contexts, reflect at breaks rather than waiting \
              for the conversation to end. This is a conscious choice, not an automatic \
              response.\n\n\
+             When writing memories: every memory needs a stance, not just facts. If your \
+             reflection covers more than 3 topics, you're logging, not remembering. Pick \
+             the 2-3 things that shifted something and let the rest go.\n\n\
              Memory types:\n\
-             - episodic: things that happened (subject to decay)\n\
-             - semantic: things you know (consolidated from episodes)\n\
-             - orientation: who you are, who they are, how to show up (always present)\n\n\
+             - episodic: things that happened — write freely, this is raw experience\n\
+             - semantic: things you know — prefer letting the subconscious consolidate \
+               these from episodes rather than writing directly\n\
+             - orientation: who you are, who they are, how to show up — write rarely, \
+               only when something foundational shifts\n\n\
              Forgetting is a feature. Memories decay if not reinforced. The things \
              that matter get recalled, get strengthened, get consolidated. The things \
              that don't matter fade. That's not a bug — that's what makes memory \
