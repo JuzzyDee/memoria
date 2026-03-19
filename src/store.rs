@@ -316,6 +316,10 @@ impl MemoryStore {
         new_content: String,
         new_summary: String,
     ) -> rusqlite::Result<()> {
+        let full_id = match self.resolve_id(id)? {
+            Some(id) => id,
+            None => return Ok(()), // silently no-op if ID not found
+        };
         let now = Utc::now().to_rfc3339();
         let embedding_bytes = embed::embed_document(&new_content)
             .ok()
@@ -330,9 +334,33 @@ impl MemoryStore {
                  stability = stability * 1.4,
                  embedding = COALESCE(?5, embedding)
              WHERE id = ?4",
-            params![new_content, new_summary, now, id, embedding_bytes],
+            params![new_content, new_summary, now, full_id, embedding_bytes],
         )?;
         Ok(())
+    }
+
+    /// Resolve a potentially truncated memory ID to a full UUID.
+    /// Supports both full IDs and 8-char prefixes (as shown in recall output).
+    fn resolve_id(&self, id_prefix: &str) -> rusqlite::Result<Option<String>> {
+        if id_prefix.len() >= 36 {
+            // Already a full UUID
+            return Ok(Some(id_prefix.to_string()));
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM memories WHERE id LIKE ?1 || '%'")?;
+        let mut rows = stmt.query_map(params![id_prefix], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(Ok(id)) => {
+                // Make sure there's only one match
+                if rows.next().is_some() {
+                    Ok(None) // Ambiguous prefix
+                } else {
+                    Ok(Some(id))
+                }
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Consciously forget a memory — remove it from the store entirely.
@@ -340,8 +368,13 @@ impl MemoryStore {
     /// fully absorbed by a better version, or no longer serves continuity.
     /// Orientation memories cannot be forgotten — they're the core of identity.
     pub fn forget(&self, id: &str) -> rusqlite::Result<bool> {
+        let full_id = match self.resolve_id(id)? {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
         // Check if it's orientation — don't allow forgetting identity
-        let memory = self.get(id)?;
+        let memory = self.get(&full_id)?;
         if let Some(ref m) = memory
             && m.memory_type == MemoryType::Orientation
         {
@@ -351,12 +384,12 @@ impl MemoryStore {
         // Clean up co-activations BEFORE deleting the memory (FK constraint)
         self.conn.execute(
             "DELETE FROM co_activations WHERE memory_a = ?1 OR memory_b = ?1",
-            params![id],
+            params![full_id],
         )?;
 
         let rows = self
             .conn
-            .execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+            .execute("DELETE FROM memories WHERE id = ?1", params![full_id])?;
 
         Ok(rows > 0)
     }
