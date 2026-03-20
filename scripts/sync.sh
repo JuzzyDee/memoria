@@ -1,14 +1,11 @@
 #!/bin/bash
 # sync.sh — Bidirectional merge sync between local and remote Memoria databases
 #
-# Instead of blindly overwriting one with the other, this merges unique
-# memories from both sides while respecting tombstones (forgotten memories).
+# Merges unique memories from both sides while respecting tombstones.
 #
 # Usage:
 #   ./scripts/sync.sh                    # Sync with default remote
 #   ./scripts/sync.sh user@host          # Sync with specific remote
-#
-# Requires: sqlite3, ssh, scp
 
 REMOTE="${1:-justindavis@100.74.207.81}"
 LOCAL_DB="$HOME/.memoria/memoria.db"
@@ -21,103 +18,107 @@ echo "Local:  $LOCAL_DB"
 echo "Remote: $REMOTE:$REMOTE_DB_PATH"
 echo ""
 
-# Step 1: Pull remote DB to temp location (don't overwrite local)
+# Step 1: Pull remote DB to temp location
 echo "Pulling remote database..."
 scp "$REMOTE:$REMOTE_DB_PATH" "$REMOTE_COPY" 2>/dev/null
-
-# Step 2: Get tombstones from both sides
-echo "Checking tombstones..."
-LOCAL_TOMBSTONES=$(sqlite3 "$LOCAL_DB" "SELECT memory_id FROM tombstones;" 2>/dev/null || echo "")
-REMOTE_TOMBSTONES=$(sqlite3 "$REMOTE_COPY" "SELECT memory_id FROM tombstones;" 2>/dev/null || echo "")
-ALL_TOMBSTONES=$(echo -e "$LOCAL_TOMBSTONES\n$REMOTE_TOMBSTONES" | sort -u | grep -v '^$')
-
-# Step 3: Find memories unique to each side
-echo "Comparing databases..."
-LOCAL_IDS=$(sqlite3 "$LOCAL_DB" "SELECT id FROM memories;" | sort)
-REMOTE_IDS=$(sqlite3 "$REMOTE_COPY" "SELECT id FROM memories;" | sort)
-
-# Memories in local but not remote
-ONLY_LOCAL=$(comm -23 <(echo "$LOCAL_IDS") <(echo "$REMOTE_IDS"))
-# Memories in remote but not local
-ONLY_REMOTE=$(comm -13 <(echo "$LOCAL_IDS") <(echo "$REMOTE_IDS"))
-
-# Filter out tombstoned memories
-if [ -n "$ALL_TOMBSTONES" ]; then
-    ONLY_LOCAL=$(echo "$ONLY_LOCAL" | grep -v -F "$ALL_TOMBSTONES" 2>/dev/null || echo "")
-    ONLY_REMOTE=$(echo "$ONLY_REMOTE" | grep -v -F "$ALL_TOMBSTONES" 2>/dev/null || echo "")
+if [ ! -f "$REMOTE_COPY" ]; then
+    echo "Error: Could not pull remote database"
+    rm -rf "$TEMP_DIR"
+    exit 1
 fi
 
-LOCAL_COUNT=$(echo "$ONLY_LOCAL" | grep -c -v '^$' 2>/dev/null || echo "0")
-REMOTE_COUNT=$(echo "$ONLY_REMOTE" | grep -c -v '^$' 2>/dev/null || echo "0")
+# Step 2: Ensure tombstone tables exist on both
+sqlite3 "$LOCAL_DB" "CREATE TABLE IF NOT EXISTS tombstones (memory_id TEXT PRIMARY KEY, forgotten_at TEXT NOT NULL);" 2>/dev/null
+sqlite3 "$REMOTE_COPY" "CREATE TABLE IF NOT EXISTS tombstones (memory_id TEXT PRIMARY KEY, forgotten_at TEXT NOT NULL);" 2>/dev/null
 
+# Step 3: Collect all tombstones from both sides
+echo "Checking tombstones..."
+sqlite3 "$LOCAL_DB" "SELECT memory_id FROM tombstones;" > "$TEMP_DIR/local_tombstones.txt" 2>/dev/null
+sqlite3 "$REMOTE_COPY" "SELECT memory_id FROM tombstones;" > "$TEMP_DIR/remote_tombstones.txt" 2>/dev/null
+cat "$TEMP_DIR/local_tombstones.txt" "$TEMP_DIR/remote_tombstones.txt" | sort -u > "$TEMP_DIR/all_tombstones.txt"
+
+# Step 4: Get memory IDs from both sides
+sqlite3 "$LOCAL_DB" "SELECT id FROM memories;" | sort > "$TEMP_DIR/local_ids.txt"
+sqlite3 "$REMOTE_COPY" "SELECT id FROM memories;" | sort > "$TEMP_DIR/remote_ids.txt"
+
+# Find unique IDs
+comm -23 "$TEMP_DIR/local_ids.txt" "$TEMP_DIR/remote_ids.txt" > "$TEMP_DIR/only_local.txt"
+comm -13 "$TEMP_DIR/local_ids.txt" "$TEMP_DIR/remote_ids.txt" > "$TEMP_DIR/only_remote.txt"
+
+# Filter out tombstoned IDs
+if [ -s "$TEMP_DIR/all_tombstones.txt" ]; then
+    grep -v -F -f "$TEMP_DIR/all_tombstones.txt" "$TEMP_DIR/only_local.txt" > "$TEMP_DIR/only_local_filtered.txt" 2>/dev/null || true
+    grep -v -F -f "$TEMP_DIR/all_tombstones.txt" "$TEMP_DIR/only_remote.txt" > "$TEMP_DIR/only_remote_filtered.txt" 2>/dev/null || true
+    mv "$TEMP_DIR/only_local_filtered.txt" "$TEMP_DIR/only_local.txt" 2>/dev/null || true
+    mv "$TEMP_DIR/only_remote_filtered.txt" "$TEMP_DIR/only_remote.txt" 2>/dev/null || true
+fi
+
+LOCAL_COUNT=$(wc -l < "$TEMP_DIR/only_local.txt" | tr -d ' ')
+REMOTE_COUNT=$(wc -l < "$TEMP_DIR/only_remote.txt" | tr -d ' ')
+
+echo "Comparing databases..."
 echo "  Unique to local:  $LOCAL_COUNT memories"
 echo "  Unique to remote: $REMOTE_COUNT memories"
 echo ""
 
-# Step 4: Copy unique remote memories to local
+# Step 5: Import remote → local using ATTACH
 if [ "$REMOTE_COUNT" -gt 0 ]; then
     echo "Importing from remote → local..."
-    echo "$ONLY_REMOTE" | while read -r id; do
+    # Build a comma-separated list of IDs for SQL IN clause
+    ID_LIST=$(awk '{printf "\x27%s\x27,", $0}' "$TEMP_DIR/only_remote.txt" | sed 's/,$//')
+
+    sqlite3 "$LOCAL_DB" "ATTACH '$REMOTE_COPY' AS remote;
+INSERT OR IGNORE INTO memories SELECT * FROM remote.memories WHERE id IN ($ID_LIST);
+DETACH remote;" 2>/dev/null
+
+    while read -r id; do
         [ -z "$id" ] && continue
-        sqlite3 "$REMOTE_COPY" ".mode insert memories
-SELECT * FROM memories WHERE id = '$id';" | sqlite3 "$LOCAL_DB" 2>/dev/null
-        echo "  ← $id"
-    done
+        echo "  ← $(echo $id | cut -c1-8)"
+    done < "$TEMP_DIR/only_remote.txt"
 fi
 
-# Step 5: Copy unique local memories to remote (via temp file)
+# Step 6: Export local → remote using ATTACH on the remote copy, then push
 if [ "$LOCAL_COUNT" -gt 0 ]; then
     echo "Exporting from local → remote..."
-    EXPORT_SQL="$TEMP_DIR/export.sql"
-    > "$EXPORT_SQL"
-    echo "$ONLY_LOCAL" | while read -r id; do
-        [ -z "$id" ] && continue
-        sqlite3 "$LOCAL_DB" ".mode insert memories
-SELECT * FROM memories WHERE id = '$id';" >> "$EXPORT_SQL" 2>/dev/null
-        echo "  → $id"
-    done
+    ID_LIST=$(awk '{printf "\x27%s\x27,", $0}' "$TEMP_DIR/only_local.txt" | sed 's/,$//')
 
-    if [ -s "$EXPORT_SQL" ]; then
-        scp "$EXPORT_SQL" "$REMOTE:/tmp/memoria_import.sql" 2>/dev/null
-        ssh "$REMOTE" "sqlite3 $REMOTE_DB_PATH < /tmp/memoria_import.sql && rm /tmp/memoria_import.sql" 2>/dev/null
-    fi
+    sqlite3 "$REMOTE_COPY" "ATTACH '$LOCAL_DB' AS local;
+INSERT OR IGNORE INTO memories SELECT * FROM local.memories WHERE id IN ($ID_LIST);
+DETACH local;" 2>/dev/null
+
+    while read -r id; do
+        [ -z "$id" ] && continue
+        echo "  → $(echo $id | cut -c1-8)"
+    done < "$TEMP_DIR/only_local.txt"
+
+    # Push updated remote copy back
+    scp "$REMOTE_COPY" "$REMOTE:$REMOTE_DB_PATH" 2>/dev/null
 fi
 
-# Step 6: Sync tombstones both ways
-if [ -n "$ALL_TOMBSTONES" ]; then
+# Step 7: Sync tombstones both ways
+if [ -s "$TEMP_DIR/all_tombstones.txt" ]; then
     echo "Syncing tombstones..."
-    echo "$ALL_TOMBSTONES" | while read -r tid; do
+    while read -r tid; do
         [ -z "$tid" ] && continue
         NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
         sqlite3 "$LOCAL_DB" "INSERT OR IGNORE INTO tombstones (memory_id, forgotten_at) VALUES ('$tid', '$NOW');" 2>/dev/null
-    done
-    # Push tombstones to remote
-    TOMBSTONE_SQL="$TEMP_DIR/tombstones.sql"
-    sqlite3 "$LOCAL_DB" ".mode insert tombstones
-SELECT * FROM tombstones;" > "$TOMBSTONE_SQL" 2>/dev/null
-    if [ -s "$TOMBSTONE_SQL" ]; then
-        scp "$TOMBSTONE_SQL" "$REMOTE:/tmp/memoria_tombstones.sql" 2>/dev/null
-        ssh "$REMOTE" "sqlite3 $REMOTE_DB_PATH 'DELETE FROM tombstones;' && sqlite3 $REMOTE_DB_PATH < /tmp/memoria_tombstones.sql && rm /tmp/memoria_tombstones.sql" 2>/dev/null
-    fi
-fi
-
-# Step 7: Clean up any tombstoned memories that exist on either side
-if [ -n "$ALL_TOMBSTONES" ]; then
-    echo "Cleaning tombstoned memories..."
-    echo "$ALL_TOMBSTONES" | while read -r tid; do
-        [ -z "$tid" ] && continue
+        sqlite3 "$REMOTE_COPY" "INSERT OR IGNORE INTO tombstones (memory_id, forgotten_at) VALUES ('$tid', '$NOW');" 2>/dev/null
+        # Also delete the actual memory if it exists despite tombstone
         sqlite3 "$LOCAL_DB" "DELETE FROM co_activations WHERE memory_a = '$tid' OR memory_b = '$tid'; DELETE FROM memories WHERE id = '$tid';" 2>/dev/null
-    done
-    ssh "$REMOTE" "echo \"$ALL_TOMBSTONES\" | while read -r tid; do [ -z \"\$tid\" ] && continue; sqlite3 $REMOTE_DB_PATH \"DELETE FROM co_activations WHERE memory_a = '\$tid' OR memory_b = '\$tid'; DELETE FROM memories WHERE id = '\$tid';\"; done" 2>/dev/null
+    done < "$TEMP_DIR/all_tombstones.txt"
+
+    # Push tombstone updates to remote
+    scp "$REMOTE_COPY" "$REMOTE:$REMOTE_DB_PATH" 2>/dev/null
 fi
 
 # Cleanup
 rm -rf "$TEMP_DIR"
 
-# Report final state
+# Report
 echo ""
 echo "── Sync Complete ──"
-LOCAL_COUNTS=$(sqlite3 "$LOCAL_DB" "SELECT memory_type, COUNT(*) FROM memories GROUP BY memory_type;")
-echo "Local store: $LOCAL_COUNTS"
+sqlite3 "$LOCAL_DB" "SELECT memory_type, COUNT(*) FROM memories GROUP BY memory_type;" | while IFS='|' read -r type count; do
+    echo "  $type: $count"
+done
 echo ""
 echo "═══ Done ═══"
