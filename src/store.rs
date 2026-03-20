@@ -147,6 +147,16 @@ impl MemoryStore {
                 .execute_batch("ALTER TABLE memories ADD COLUMN embedding BLOB;")?;
         }
 
+        // Tombstone table: records forgotten memory IDs so sync doesn't reintroduce them.
+        // When a memory is forgotten on one device, the tombstone prevents it from
+        // being re-imported from another device's database during merge sync.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tombstones (
+                memory_id TEXT PRIMARY KEY,
+                forgotten_at TEXT NOT NULL
+            );",
+        )?;
+
         // Co-activation table: tracks which memories are recalled together.
         // "Neurons that fire together wire together" — Hebbian learning.
         // When two memories surface in the same recall, their co-activation
@@ -390,6 +400,15 @@ impl MemoryStore {
         let rows = self
             .conn
             .execute("DELETE FROM memories WHERE id = ?1", params![full_id])?;
+
+        // Record tombstone so sync doesn't reintroduce this memory
+        if rows > 0 {
+            let now = Utc::now().to_rfc3339();
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tombstones (memory_id, forgotten_at) VALUES (?1, ?2)",
+                params![full_id, now],
+            )?;
+        }
 
         Ok(rows > 0)
     }
