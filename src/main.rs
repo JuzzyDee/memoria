@@ -74,6 +74,14 @@ struct ReframeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReviewParams {
+    /// Minimum strength threshold (0.0-1.0). Only memories above this strength are shown.
+    /// Default: 0.3. Lower values show more faded memories, higher values show only vivid ones.
+    #[serde(default)]
+    min_strength: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ForgetParams {
     /// The ID of the memory to forget.
     memory_id: String,
@@ -245,6 +253,54 @@ impl MemoriaServer {
             }
         } else if orientation.is_empty() {
             result.push_str("No memories yet. This is a fresh start.\n");
+        }
+
+        result
+    }
+
+    #[tool(
+        description = "Survey the full memory landscape. Returns compact summaries of all memories above a strength threshold, grouped by type. Use this to see the big picture before diving deep with recall. Designed for reflection and pattern-finding — see what's there, notice what connects, then recall specific memories for full content.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn review(&self, Parameters(params): Parameters<ReviewParams>) -> String {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let min_strength = params.min_strength.unwrap_or(0.3);
+
+        let memories = match store.review(min_strength) {
+            Ok(m) => m,
+            Err(e) => return format!("Error reviewing memories: {}", e),
+        };
+
+        let (ep_count, sem_count, ori_count) = store.count_by_type().unwrap_or((0, 0, 0));
+
+        let mut result = format!(
+            "═══ Memoria Review ═══\n\
+             Total: {} episodic, {} semantic, {} orientation\n\
+             Showing memories with strength ≥ {:.1}\n\n",
+            ep_count, sem_count, ori_count, min_strength,
+        );
+
+        let mut current_type = String::new();
+        for (id, memory_type, summary, access_count, strength) in &memories {
+            if *memory_type != current_type {
+                current_type = memory_type.clone();
+                result.push_str(&format!("── {} ──\n", current_type));
+            }
+            result.push_str(&format!(
+                "  [{}] str:{:.2} acc:{:>2} | {}\n",
+                &id[..8],
+                strength,
+                access_count,
+                summary
+            ));
         }
 
         result

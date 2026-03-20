@@ -552,6 +552,36 @@ impl MemoryStore {
         Ok(scored)
     }
 
+    /// Review: return a compact summary of all active memories above a strength threshold.
+    /// Grouped by type, summaries only, sorted by creation date descending.
+    /// Designed for the subconscious to survey the full landscape before going deep.
+    pub fn review(
+        &self,
+        min_strength: f64,
+    ) -> rusqlite::Result<Vec<(String, String, String, u32, f64)>> {
+        let sql = format!(
+            "SELECT id, memory_type, summary, access_count, strength
+             FROM memories
+             WHERE strength >= ?1
+             ORDER BY memory_type, created_at DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let results = stmt
+            .query_map(params![min_strength], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u32>(3)?,
+                    row.get::<_, f64>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        Ok(results)
+    }
+
     /// Record co-activation for a set of memories recalled together.
     /// For every pair in the set, increment the co-activation count.
     /// This is the Hebbian signal: memories that fire together wire together.
