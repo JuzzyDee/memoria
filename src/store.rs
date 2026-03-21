@@ -582,6 +582,43 @@ impl MemoryStore {
         Ok(results)
     }
 
+    /// Find the top-N semantically similar neighbours for a given embedding.
+    /// Used at write time to record co-activations with related memories.
+    pub fn find_neighbours(
+        &self,
+        query_embedding: &[f64],
+        exclude_id: &str,
+        limit: usize,
+        min_similarity: f64,
+    ) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, embedding FROM memories WHERE id != ?1 AND embedding IS NOT NULL",
+        )?;
+
+        let mut scored: Vec<(String, f64)> = stmt
+            .query_map(params![exclude_id], |row| {
+                let id: String = row.get(0)?;
+                let embedding_bytes: Vec<u8> = row.get(1)?;
+                Ok((id, embedding_bytes))
+            })?
+            .filter_map(|r| r.ok())
+            .filter_map(|(id, bytes)| {
+                let embedding = embed::embedding_from_bytes(&bytes);
+                let sim = embed::cosine_similarity(query_embedding, &embedding);
+                if sim >= min_similarity {
+                    Some((id, sim))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        Ok(scored.into_iter().map(|(id, _)| id).collect())
+    }
+
     /// Record co-activation for a set of memories recalled together.
     /// For every pair in the set, increment the co-activation count.
     /// This is the Hebbian signal: memories that fire together wire together.
@@ -1193,5 +1230,72 @@ mod tests {
         // Forgetting m1 should clean up co-activations
         store.forget(&m1.id).unwrap();
         assert_eq!(store.get_co_activations(1, 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_find_neighbours() {
+        let store = MemoryStore::open_in_memory().unwrap();
+
+        // Create memories with known embeddings (3-dimensional for simplicity)
+        let m1 = Memory {
+            id: "mem-1".into(),
+            memory_type: MemoryType::Episodic,
+            content: "Memory about music".into(),
+            summary: "Music".into(),
+            created_at: Utc::now(),
+            last_accessed: Utc::now(),
+            access_count: 0,
+            strength: 1.0,
+            stability: 1.0,
+            entity: None,
+            tags: vec![],
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+        };
+        store.remember(&m1).unwrap();
+
+        let m2 = Memory {
+            id: "mem-2".into(),
+            memory_type: MemoryType::Episodic,
+            content: "Memory about audio".into(),
+            summary: "Audio".into(),
+            created_at: Utc::now(),
+            last_accessed: Utc::now(),
+            access_count: 0,
+            strength: 1.0,
+            stability: 1.0,
+            entity: None,
+            tags: vec![],
+            embedding: Some(vec![0.9, 0.1, 0.0]), // similar to m1
+        };
+        store.remember(&m2).unwrap();
+
+        let m3 = Memory {
+            id: "mem-3".into(),
+            memory_type: MemoryType::Episodic,
+            content: "Memory about cooking".into(),
+            summary: "Cooking".into(),
+            created_at: Utc::now(),
+            last_accessed: Utc::now(),
+            access_count: 0,
+            strength: 1.0,
+            stability: 1.0,
+            entity: None,
+            tags: vec![],
+            embedding: Some(vec![0.0, 0.0, 1.0]), // orthogonal to m1
+        };
+        store.remember(&m3).unwrap();
+
+        // Find neighbours of m1's embedding — m2 should match, m3 should not
+        let neighbours = store
+            .find_neighbours(&[1.0, 0.0, 0.0], "mem-1", 5, 0.5)
+            .unwrap();
+        assert_eq!(neighbours.len(), 1);
+        assert_eq!(neighbours[0], "mem-2");
+
+        // With low threshold, both should match
+        let neighbours = store
+            .find_neighbours(&[1.0, 0.0, 0.0], "mem-1", 5, 0.0)
+            .unwrap();
+        assert_eq!(neighbours.len(), 2);
     }
 }

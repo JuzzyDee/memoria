@@ -337,12 +337,43 @@ impl MemoriaServer {
             params.entity,
             params.tags,
         ) {
-            Ok(m) => format!(
-                "Remembered [{}]: {} (id: {})",
-                m.memory_type.as_str(),
-                m.summary,
-                &m.id[..8]
-            ),
+            Ok(m) => {
+                // Write-time co-activation: find semantically similar neighbours
+                // and record Hebbian links so related memories strengthen even
+                // without being recalled together.
+                let neighbour_count = if let Some(ref emb) = m.embedding {
+                    match store.find_neighbours(emb, &m.id, 5, 0.5) {
+                        Ok(neighbour_ids) if !neighbour_ids.is_empty() => {
+                            let mut ids: Vec<&str> =
+                                neighbour_ids.iter().map(|s| s.as_str()).collect();
+                            ids.push(&m.id);
+                            let _ = store.record_co_activation(&ids);
+                            neighbour_ids.len()
+                        }
+                        _ => 0,
+                    }
+                } else {
+                    0
+                };
+
+                if neighbour_count > 0 {
+                    format!(
+                        "Remembered [{}]: {} (id: {}, linked to {} neighbour{})",
+                        m.memory_type.as_str(),
+                        m.summary,
+                        &m.id[..8],
+                        neighbour_count,
+                        if neighbour_count == 1 { "" } else { "s" }
+                    )
+                } else {
+                    format!(
+                        "Remembered [{}]: {} (id: {})",
+                        m.memory_type.as_str(),
+                        m.summary,
+                        &m.id[..8]
+                    )
+                }
+            }
             Err(e) => format!("Error storing memory: {}", e),
         }
     }
