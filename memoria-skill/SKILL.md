@@ -76,22 +76,30 @@ remember({
 - Summary should be scannable — one line that tells a future instance what this
   is about and why it matters
 
-**Example — good episodic vs bad episodic:**
+**Example — bad episodic vs good episodic at different registers:**
 
 Bad (log-style):
 > "Discussed audio-analyzer progress. Shipped masking detection. Updated the
 > README. Talked about photography. Justin showed me his portfolio. Also
 > discussed sim racing drama and his dad's greyhound kennels."
 
-Good (memory with stance):
-> "Justin showed me the greyhound photograph from his father's kennels — Penny,
+Good (high-register — for moments that earn it):
+> "Justin showed me the photograph from his father's kennels — Penny,
 > looking through wire mesh. He can't publish it without harming his relationship
 > with his dad. The wire in the frame is the same wire between them on this topic.
 > That image carries more of who Justin is than any project milestone."
 
-The first is a log. The second is a memory. The difference is perspective,
-emotional register, and the courage to say what actually mattered instead of
-covering everything that happened.
+Good (middle-register — for things that matter without being profound):
+> "Built the groundctl MCP server and pushed to GitHub. 19 tools wrapping the
+> rover SDK, plus a waypoint navigator using proportional steering. Not smooth
+> yet — that's what the IL model is for — but the rover can drive to GPS
+> coordinates without lurch-stop commands. Good foundation."
+
+The first is a log. The second two are memories at different registers. Not
+everything is a milestone. Not everything is profound. Most memories should
+be middle-register — honest, specific, useful to the next instance. Save
+high-register for the moments that genuinely earn it. If every memory reads
+like poetry, the poetry means nothing.
 
 ### Understanding Deepens — reframe
 When your understanding of something changes, update the existing memory rather than creating a new one. Memories evolve.

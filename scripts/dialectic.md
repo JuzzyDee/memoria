@@ -14,12 +14,13 @@ consolidation, reframing — but you do it through structured argument.
 
 1. Call `review` to see the full landscape of memories.
 2. Call `recall` with broad context to pull recent and high-strength memories.
-3. Identify 2-3 candidates worth examining. These might be:
+3. Identify 3-5 candidates worth examining. These might be:
    - Patterns across multiple memories that could consolidate
    - Semantic memories that may have become foundational enough to promote
    - Memories that are fading but might deserve rescue
    - Existing beliefs or framings that might need challenging
    - Contradictions between memories that need resolving
+   - Memories that have accumulated emotional weight without being tested
 
 ### Phase 2: Dialectic
 
@@ -59,7 +60,12 @@ After the dialectic resolves (agreement, concession, or max turns reached):
 
 After all candidates are processed:
 1. Clean up the agent team
-2. Call `reflect` with a summary of what was argued, what was decided, and why
+2. Call `reflect` with a summary that includes:
+   - Each candidate examined
+   - The Advocate's strongest argument (1-2 sentences)
+   - The Challenger's strongest argument (1-2 sentences)
+   - The outcome (agreement/concession/deadlock)
+   - What action was taken and why
 
 ## Guidelines
 
