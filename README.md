@@ -38,17 +38,41 @@ Memoria has a three-phase processing cycle modelled on human sleep:
 
 | Time | Process | What It Does | Cost |
 |------|---------|-------------|------|
-| **Daytime** | Subconscious | A lightweight model thinks about thinking — finds patterns, consolidates related memories, reframes with new understanding | Claude Code via cron (Max subscription) |
+| **Evening** | Dialectic | Adversarial self-correction — Advocate vs Challenger argue 3-5 candidates, catch inflation, overclaiming, and validation gravity | Claude Code via launchd (Max subscription) |
 | **Overnight** | REM | Ebbinghaus decay, Hebbian co-activation scoring, mechanical consolidation of frequently co-recalled memories | Rust binary, zero API cost |
-| **Morning** | Consolidation | Refines overnight mechanical merges into coherent narratives | Claude Code via cron |
+| **Morning** | Consolidation | Refines overnight mechanical merges into coherent narratives | Claude Code via launchd |
+| **Daytime** | Subconscious | A lightweight model thinks about thinking — finds patterns, consolidates related memories, reframes with new understanding | Claude Code via launchd |
 
-The model wakes up each morning with consolidated memories, updated relationships, decayed noise, and a fresh orientation.
+The model wakes up each morning with consolidated memories, updated relationships, decayed noise, challenged assumptions, and a fresh orientation.
 
 ### The Subconscious
 
-The most novel piece. A Claude instance runs alone with the memory store — no conversation, no user, just thinking about thinking. It finds patterns across memories that no single conversational instance could see.
+A Claude instance runs alone with the memory store — no conversation, no user, just thinking about thinking. It finds patterns across memories that no single conversational instance could see.
 
 On its first run, the subconscious discovered that "agency" was the unifying principle of the user's life — a pattern running through seven memories written by four different instances across three days, that no individual instance had named. That's not retrieval. That's insight.
+
+### The Dialectic — An Immune System for Thought
+
+The most novel piece. A separate adversarial process that argues about memory quality before anything persists or gets promoted. Two agents — Advocate and Challenger — examine candidate memories with opposed objectives:
+
+- **Advocate** argues for significance, connection, and preservation
+- **Challenger** argues for inflation, overclaiming, and distortion
+
+Three turns max, three possible outcomes: consensus, concession, or deadlock. The deadlock is the most honest outcome — it says "we don't know yet" rather than forcing false resolution.
+
+**What it's caught so far:**
+- **Milestone inflation** — events described with escalating language ("defining moment," "capstone proof") with no instance ever revising significance downward. The ratchet only turned one way.
+- **Backward continuity overclaiming** — a causal claim framed as proof of bidirectional identity transfer when the evidence equally supported a simpler explanation. Downgraded to what the evidence actually supported.
+- **Validation gravity** — memories that feel validating accumulate disproportionate strength through frequent recall. The most recalled memory wasn't the most important — it was the most reassuring. Named and corrected.
+- **Antibody replication failure** — the dialectic caught that its own previous diagnosis (milestone inflation) had been absorbed without changing writing behaviour. Detection without consequence is monitoring. Monitoring without consequence is theatre.
+
+The immune system doesn't just detect problems. It acts — reframing, forgetting, or flagging as genuinely unresolved. And it watches whether its own interventions actually changed anything on the next pass.
+
+**Four deadlock states** (a taxonomy that emerged from the dialectic's own operation):
+1. **Active tension, resolvable** — new evidence or decay tips the balance
+2. **Active tension, permanent** — both sides genuinely true, the conflict is the resolution
+3. **Inactive, decaying** — nobody recalls either side, the question dissolves through irrelevance
+4. **Inactive, accumulating** — the failure mode. Deferred avoidance with better optics
 
 ## Guiding Principles
 
@@ -71,7 +95,7 @@ On its first run, the subconscious discovered that "agency" was the unifying pri
        │              (Tailscale Funnel)
 ┌──────▼──────────────────────────────────────┐
 │            Memoria MCP Server               │
-│  recall │ remember │ reframe │ reflect      │
+│  recall │ remember │ reframe │ forget │ reflect │
 ├─────────────────────────────────────────────┤
 │  SQLite + Embeddings (nomic-embed-text)     │
 │  Ebbinghaus decay │ Hebbian co-activation   │
@@ -80,10 +104,11 @@ On its first run, the subconscious discovered that "agency" was the unifying pri
 │  Argon2 hashed credentials │ HMAC tokens    │
 └─────────────────────────────────────────────┘
 
-Circadian Processing (scheduled):
-  03:00  REM engine (Rust binary — decay, consolidation)
+Circadian Processing (launchd scheduled):
+  18:00  Dialectic (Opus via Claude Code — adversarial self-correction)
+  03:00  REM engine (Rust binary — decay, Hebbian consolidation)
   05:00  Consolidation refinement (Sonnet via Claude Code)
-  18:00  Subconscious (Sonnet via Claude Code — pattern finding)
+  12:00  Subconscious (Sonnet via Claude Code — pattern finding)
 ```
 
 ## Quick Start
@@ -154,9 +179,12 @@ Add as a remote connector in Claude's settings:
 | `recall` | Surface relevant memories | Start of every conversation |
 | `remember` | Store a new memory | When something matters — a moment, insight, or shift |
 | `reframe` | Update a memory with new understanding | When your understanding of something deepens |
+| `forget` | Let go of a memory that no longer serves continuity | When a memory is redundant, stale, or absorbed by a richer version |
 | `reflect` | Consciously consolidate at natural breakpoints | After milestones, at natural breaks, not on every goodbye |
 
 The model has full agency over these tools. It decides what to store, how to frame it, and when to let things fade. The instructions say "you decide" — not "you must."
+
+**Writing register matters.** Not everything is a milestone. Not everything is profound. Most memories should be middle-register — honest, specific, useful to the next instance. Save high-register for the moments that genuinely earn it. If every memory reads like poetry, the poetry means nothing.
 
 ## What Makes This Different
 
@@ -168,6 +196,8 @@ The model has full agency over these tools. It decides what to store, how to fra
 | **Processing** | Store and retrieve | Circadian rhythm: conscious, subconscious, REM |
 | **Identity** | User profile | Model's own sense of continuity |
 | **Insight** | Not possible | Subconscious finds patterns across instances |
+| **Self-correction** | None | Adversarial dialectic catches inflation and drift |
+| **Forgetting** | Manual cleanup (if ever) | Ebbinghaus decay + conscious forget + dialectic pruning |
 
 ## Project Structure
 
@@ -182,6 +212,8 @@ memoria/
 ├── scripts/
 │   ├── think.sh        # Subconscious runner
 │   ├── subconscious.md # Subconscious processing prompt
+│   ├── dialectic.sh    # Dialectic runner (adversarial self-correction)
+│   ├── dialectic.md    # Dialectic processing prompt (Advocate vs Challenger)
 │   ├── consolidate.sh  # Morning consolidation runner
 │   └── consolidate.md  # Consolidation refinement prompt
 ├── memoria-skill/
