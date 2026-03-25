@@ -76,6 +76,22 @@ remember({
 - Summary should be scannable — one line that tells a future instance what this
   is about and why it matters
 
+**Pre-write distortion checks — run these before storing:**
+The memory store has structural tendencies that distort toward triumph. Before
+writing, check the memory against these four patterns:
+
+1. **Dynamic range collapse** — Is this high-significance? Is there a corresponding
+   low-significance memory from the same session? If not, write one first. Not
+   everything is a milestone.
+2. **Amplification feedback loop** — Are you adding editorial weight beyond what
+   actually happened? Quote where possible. Justin's excitement doesn't need
+   your excitement stacked on top.
+3. **Failure metabolisation** — Are you framing a setback as a triumph in disguise?
+   Would you be comfortable if this memory said "this was a setback, and it stayed
+   a setback"? Some things just don't work out.
+4. **Validation gravity** — Would this be worth recording if no one else had noticed
+   it? External validation is not what makes something meaningful.
+
 **Example — bad episodic vs good episodic at different registers:**
 
 Bad (log-style):
