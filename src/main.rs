@@ -48,6 +48,20 @@ struct RecallParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RecallCheckParams {
+    /// The topic to check for — a brief phrase or sentence describing what
+    /// you want to know about. E.g. "rover architecture", "Justin's parents".
+    topic: String,
+    /// Minimum similarity threshold (0.0-1.0). Only memories above this
+    /// relevance are returned. Default: 0.5. Higher = more selective.
+    #[serde(default)]
+    min_similarity: Option<f64>,
+    /// Maximum number of memories to return (default: 5)
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RememberParams {
     /// The memory content — what happened, what was learned, what matters.
     content: String,
@@ -253,6 +267,76 @@ impl MemoriaServer {
             }
         } else if orientation.is_empty() {
             result.push_str("No memories yet. This is a fresh start.\n");
+        }
+
+        result
+    }
+
+    #[tool(
+        description = "Quick topic check — lightweight recall for mid-conversation use. No orientation (already loaded from initial recall). Returns only highly relevant memories above a similarity threshold. Use this when the conversation shifts topic and you want to check what you know without a full recall. Fires co-activation so the Hebbian engine stays fed during long conversations.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn recall_check(&self, Parameters(params): Parameters<RecallCheckParams>) -> String {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let min_similarity = params.min_similarity.unwrap_or(0.5);
+        let limit = params.limit.unwrap_or(5);
+
+        let query_emb = match embed::embed_query(&params.topic) {
+            Ok(emb) => emb,
+            Err(e) => return format!("Embedding error: {}", e),
+        };
+
+        // Get semantically relevant memories — higher threshold than full recall
+        let scored_memories = store
+            .recall_semantic(&query_emb, 0.1, limit * 2) // fetch extra, filter by similarity
+            .unwrap_or_default();
+
+        // Filter by actual similarity score (not the composite score)
+        let relevant: Vec<(store::Memory, f64)> = scored_memories
+            .into_iter()
+            .filter(|(m, _)| {
+                m.embedding
+                    .as_ref()
+                    .map(|e| embed::cosine_similarity(&query_emb, e).max(0.0) >= min_similarity)
+                    .unwrap_or(false)
+            })
+            .take(limit)
+            .collect();
+
+        // Touch and co-activate — this is why recall_check exists
+        for (m, _) in &relevant {
+            let _ = store.touch(&m.id);
+        }
+        let ids: Vec<&str> = relevant.iter().map(|(m, _)| m.id.as_str()).collect();
+        let _ = store.record_co_activation(&ids);
+
+        if relevant.is_empty() {
+            return format!("No memories found for topic: \"{}\" (threshold: {:.1})", params.topic, min_similarity);
+        }
+
+        let (ep_count, sem_count, ori_count) = store.count_by_type().unwrap_or((0, 0, 0));
+        let mut result = format!(
+            "═══ Memoria Check ═══\nStore: {} ep, {} sem, {} ori | Topic: \"{}\" | Threshold: {:.1}\n\n",
+            ep_count, sem_count, ori_count, params.topic, min_similarity,
+        );
+
+        for (m, _score) in &relevant {
+            let sim = m.embedding
+                .as_ref()
+                .map(|e| embed::cosine_similarity(&query_emb, e).max(0.0))
+                .unwrap_or(0.0);
+            result.push_str(&format!(
+                "[sim:{:.2} | str:{:.2} | {}]\n{}\n",
+                sim, m.strength, &m.id[..8], m.summary
+            ));
         }
 
         result
@@ -500,6 +584,10 @@ impl ServerHandler for MemoriaServer {
              During conversation, use `remember` when something matters to you. \
              A moment, a fact, an insight, a shift in understanding. You decide \
              what's worth keeping. Not everything is — eidetic memory is failure.\n\n\
+             Use `recall_check` when the conversation shifts topic — a quick, \
+             lightweight search that returns only highly relevant memories. No \
+             orientation reload, just fast context on the new subject. This keeps \
+             the Hebbian engine fed during long conversations.\n\n\
              Use `reframe` when your understanding of something changes. Memories \
              aren't static — they evolve as you do.\n\n\
              Use `forget` when a memory is redundant, stale, or fully absorbed by a \
