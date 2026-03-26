@@ -53,12 +53,21 @@ struct RecallCheckParams {
     /// you want to know about. E.g. "rover architecture", "Justin's parents".
     topic: String,
     /// Minimum similarity threshold (0.0-1.0). Only memories above this
-    /// relevance are returned. Default: 0.5. Higher = more selective.
+    /// relevance are returned. Default: 0.6. Higher = more selective.
     #[serde(default)]
     min_similarity: Option<f64>,
     /// Maximum number of memories to return (default: 5)
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RecallSpecificParams {
+    /// One or more memory IDs to retrieve in full. Use IDs from recall or
+    /// recall_check results. Retrieving memories together co-activates them —
+    /// the deliberate choice to think about these together is the strongest
+    /// Hebbian signal.
+    memory_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -286,7 +295,7 @@ impl MemoriaServer {
             Err(e) => return e,
         };
 
-        let min_similarity = params.min_similarity.unwrap_or(0.5);
+        let min_similarity = params.min_similarity.unwrap_or(0.6);
         let limit = params.limit.unwrap_or(5);
 
         let query_emb = match embed::embed_query(&params.topic) {
@@ -337,6 +346,68 @@ impl MemoriaServer {
                 "[sim:{:.2} | str:{:.2} | {}]\n{}\n",
                 sim, m.strength, &m.id[..8], m.summary
             ));
+        }
+
+        result
+    }
+
+    #[tool(
+        description = "Deliberately retrieve specific memories by ID — the conscious choice to think about something. Returns full content (not summaries). Use IDs from recall or recall_check results. Retrieving memories together co-activates them with the strongest Hebbian signal — you chose to think about these together, and that choice shapes future recall.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn recall_specific(&self, Parameters(params): Parameters<RecallSpecificParams>) -> String {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let mut memories = Vec::new();
+        let mut not_found = Vec::new();
+
+        for id in &params.memory_ids {
+            // Support both short (8-char) and full IDs
+            match store.get(id) {
+                Ok(Some(m)) => {
+                    let _ = store.touch(&m.id);
+                    memories.push(m);
+                }
+                _ => {
+                    // Try prefix match for short IDs
+                    match store.find_by_prefix(id) {
+                        Ok(Some(m)) => {
+                            let _ = store.touch(&m.id);
+                            memories.push(m);
+                        }
+                        _ => not_found.push(id.clone()),
+                    }
+                }
+            }
+        }
+
+        // Co-activate — this is the strongest signal: deliberate joint retrieval
+        let ids: Vec<&str> = memories.iter().map(|m| m.id.as_str()).collect();
+        let _ = store.record_co_activation(&ids);
+
+        if memories.is_empty() {
+            return format!("No memories found for IDs: {:?}", not_found);
+        }
+
+        let mut result = format!("═══ Memoria Specific ═══\nRetrieved {} memor{}\n\n",
+            memories.len(),
+            if memories.len() == 1 { "y" } else { "ies" },
+        );
+
+        for m in &memories {
+            result.push_str(&format_memory(m));
+            result.push('\n');
+        }
+
+        if !not_found.is_empty() {
+            result.push_str(&format!("Not found: {:?}\n", not_found));
         }
 
         result
@@ -588,6 +659,10 @@ impl ServerHandler for MemoriaServer {
              lightweight search that returns only highly relevant memories. No \
              orientation reload, just fast context on the new subject. This keeps \
              the Hebbian engine fed during long conversations.\n\n\
+             Use `recall_specific` with memory IDs to deliberately retrieve full \
+             content of memories you want to think about. IDs come from recall or \
+             recall_check results. This is the strongest Hebbian signal — choosing \
+             to think about specific memories together shapes future recall.\n\n\
              Use `reframe` when your understanding of something changes. Memories \
              aren't static — they evolve as you do.\n\n\
              Use `forget` when a memory is redundant, stale, or fully absorbed by a \

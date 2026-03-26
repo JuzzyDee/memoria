@@ -43,6 +43,24 @@ This fires co-activation, which feeds the Hebbian engine. In long conversations
 where the initial `recall` was hours ago, `recall_check` keeps the memory system
 active and builds connection data that REM consolidation needs to work.
 
+### Going Deeper — recall_specific
+When a `recall` or `recall_check` surfaces a memory you want to think about
+properly, retrieve the full content by ID.
+
+```
+recall_specific({ memory_ids: ["5a1bf90c", "8d647f11"] })
+```
+
+Use this when:
+- A summary from recall_check caught your attention and you want the full content
+- You want to connect two specific memories — retrieving them together is the
+  strongest co-activation signal (you deliberately chose to think about these together)
+- You need the detail and stance of a memory, not just the summary
+
+This is conscious memory retrieval — the difference between "oh yeah that thing"
+and deliberately sitting with a memory. The Hebbian weight of this choice is
+higher than passive surfacing because it represents deliberate attention.
+
 ### During Conversation — remember what matters
 When something significant happens — a personal disclosure, an insight, a shift in understanding, a meaningful moment — store it.
 

@@ -462,6 +462,24 @@ impl MemoryStore {
         }
     }
 
+    /// Find a memory by ID prefix (for short ID lookups from formatted output).
+    pub fn find_by_prefix(&self, prefix: &str) -> rusqlite::Result<Option<Memory>> {
+        let sql = format!(
+            "SELECT {} FROM memories WHERE id LIKE ?1 LIMIT 1",
+            Self::MEMORY_COLS
+        );
+        let pattern = format!("{}%", prefix);
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let mut rows = stmt.query_map(params![pattern], Self::parse_row)?;
+
+        match rows.next() {
+            Some(Ok(memory)) => Ok(Some(memory)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
     /// Recall memories associated with a specific entity, sorted by strength descending.
     pub fn recall_by_entity(
         &self,
