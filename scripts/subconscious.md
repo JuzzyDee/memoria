@@ -27,6 +27,15 @@ You handle meaning.
    stable truth, consider creating a semantic version.
 7. **Forget** — only if something is genuinely redundant or fully absorbed.
    Don't spend your pass cleaning up. Spend it thinking.
+8. **Decompose** — if you find a mega-reflection covering more than 3-4 distinct
+   topics, split it into focused episodics. A 500-word reflection about "the whole
+   day" embeds poorly — it matches everything loosely and nothing precisely. The
+   individual moments (the gelato story, the Chopper morning, the security panic)
+   embed cleanly and surface when they're actually relevant. Extract the 2-3
+   strongest moments as standalone episodics with their own stance, then demote
+   or forget the mega-reflection once the pieces are safely extracted. This is
+   how human memory works: you remember moments, not days. The day is
+   reconstructed from the moments, not stored as a block.
 
 ## Guidelines
 
