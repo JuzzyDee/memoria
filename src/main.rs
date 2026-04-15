@@ -23,9 +23,17 @@ mod store;
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    model::{Content, IntoContents, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
 };
+
+/// Wrapper for returning multiple content blocks (text + image) from an MCP tool.
+struct MultiContent(Vec<Content>);
+impl IntoContents for MultiContent {
+    fn into_contents(self) -> Vec<Content> {
+        self.0
+    }
+}
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -84,6 +92,38 @@ struct RememberParams {
     /// Optional: tags for association (e.g. ["audio-analyzer", "milestone"]).
     #[serde(default)]
     tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RecallImageParams {
+    /// The ID of the memory whose image to retrieve. Get IDs from `recall`.
+    memory_id: String,
+    /// Resolution to serve the image at. One of:
+    ///   - "thumbnail" (240px long edge): cheap, for browsing/scanning
+    ///   - "recall" (default, 720px long edge): archival, for full context
+    ///   - "full": original resolution, no scaling
+    #[serde(default)]
+    resolution: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct RememberWithImageParams {
+    /// Main content — what you want to remember. Can be rich text, multi-paragraph.
+    content: String,
+    /// A short summary — one line, the essence of this memory.
+    summary: String,
+    /// Memory type: "episodic" (events), "semantic" (knowledge), or "orientation" (identity).
+    memory_type: String,
+    /// Optional: which person or entity this relates to (e.g. "justin", "chopper").
+    #[serde(default)]
+    entity: Option<String>,
+    /// Optional: tags for association.
+    #[serde(default)]
+    tags: Vec<String>,
+    /// Raw image bytes, base64-encoded.
+    image_base64: String,
+    /// MIME type of the image ("image/jpeg", "image/png", "image/webp").
+    image_mime: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -182,6 +222,18 @@ fn format_memory(m: &store::Memory) -> String {
         m.content
     )
 }
+
+// TODO: uncomment when visual memory is ready for release
+// fn format_memory_with_image_hint(m: &store::Memory) -> String {
+//     let mut result = format_memory(m);
+//     if m.image_base64.is_some() {
+//         result.push_str(&format!(
+//             "  [has image — use recall_image(\"{}\") to view]\n",
+//             &m.id[..8]
+//         ));
+//     }
+//     result
+// }
 
 #[tool_router]
 impl MemoriaServer {
@@ -411,6 +463,130 @@ impl MemoriaServer {
         }
 
         result
+    }
+
+    #[tool(
+        description = "Retrieve the image associated with a memory. Returns the image as an MCP ImageContent block at the requested resolution. Use after `recall` surfaces a memory that has an image attached — the memory listing indicates which memories have images. Default resolution is 'recall' (720px long edge, archival quality). Use 'thumbnail' (240px) for fast browsing, 'full' for original resolution.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn recall_image(
+        &self,
+        Parameters(params): Parameters<RecallImageParams>,
+    ) -> MultiContent {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return MultiContent(vec![Content::text(e)]),
+        };
+
+        // Look up the memory to get its image_hash and image_mime
+        let memory = match store.get(&params.memory_id) {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                return MultiContent(vec![Content::text(format!(
+                    "Memory not found: {}",
+                    params.memory_id
+                ))]);
+            }
+            Err(e) => {
+                return MultiContent(vec![Content::text(format!(
+                    "Error looking up memory: {}",
+                    e
+                ))]);
+            }
+        };
+
+        let hash = match memory.image_hash.as_deref() {
+            Some(h) => h,
+            None => {
+                return MultiContent(vec![Content::text(format!(
+                    "Memory {} has no image attached.",
+                    &params.memory_id[..8]
+                ))]);
+            }
+        };
+        let mime = memory.image_mime.as_deref().unwrap_or("image/jpeg");
+
+        let long_edge = match params.resolution.as_deref() {
+            Some("thumbnail") => Some(240),
+            Some("full") => None,
+            _ => Some(720), // "recall" default
+        };
+
+        match store.read_image_scaled(hash, mime, long_edge) {
+            Ok((base64_data, mime_type)) => MultiContent(vec![
+                Content::text(format!(
+                    "Image from memory {} ({}): {}",
+                    &memory.id[..8],
+                    memory.memory_type.as_str(),
+                    memory.summary
+                )),
+                Content::image(base64_data, mime_type),
+            ]),
+            Err(e) => MultiContent(vec![Content::text(format!(
+                "Error reading image for memory {}: {}",
+                &params.memory_id[..8],
+                e
+            ))]),
+        }
+    }
+
+    #[tool(
+        description = "Remember something with an associated image. Like `remember`, but also attaches an image. The image_base64 should be the raw image bytes base64-encoded; the Rust layer will decode, hash, and store to content-addressed storage. Use this when a specific visual is load-bearing for the memory's function (e.g. a scene you want to be able to recall visually later, not just describe).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn remember_with_image(
+        &self,
+        Parameters(params): Parameters<RememberWithImageParams>,
+    ) -> String {
+        let store = match self.open_store() {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let memory_type = match params.memory_type.to_lowercase().as_str() {
+            "episodic" => MemoryType::Episodic,
+            "semantic" => MemoryType::Semantic,
+            "orientation" => MemoryType::Orientation,
+            other => {
+                return format!(
+                    "Invalid memory_type: {}. Must be 'episodic', 'semantic', or 'orientation'.",
+                    other
+                );
+            }
+        };
+
+        // Decode the base64 image
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+        let image_bytes = match BASE64_STANDARD.decode(&params.image_base64) {
+            Ok(bytes) => bytes,
+            Err(e) => return format!("Error decoding base64 image: {}", e),
+        };
+
+        match store.create_memory_with_image(
+            memory_type,
+            params.content,
+            params.summary,
+            params.entity,
+            params.tags,
+            &image_bytes,
+            &params.image_mime,
+        ) {
+            Ok(memory) => format!(
+                "✓ Remembered with image: {} (id: {}, image: {}...)",
+                memory.summary,
+                &memory.id[..8],
+                &memory.image_hash.as_deref().unwrap_or("")[..12]
+            ),
+            Err(e) => format!("Error storing memory: {}", e),
+        }
     }
 
     #[tool(
@@ -730,6 +906,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting Memoria MCP server...");
     tracing::info!("Database: {}", db_path.display());
 
+    // Open the store once at startup to run any pending schema migrations
+    // before we start serving requests. Drop it immediately — per-request
+    // opens will continue to work as before.
+    {
+        let _ = MemoryStore::open(&db_path)?;
+        tracing::info!("Schema initialised.");
+    }
+
     if let Some(port) = port {
         // Remote mode — HTTP transport (with or without TLS)
         serve_http(db_path, port, !no_tls).await?;
@@ -754,10 +938,52 @@ async fn serve_http(
     use bytes::Bytes;
     use http::{Method, Request, Response, StatusCode};
     use http_body_util::{BodyExt, Full};
+    use std::collections::HashMap;
     use std::convert::Infallible;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     type BoxBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
+
+    /// Simple rate limiter for auth failures. Tracks failed attempts per IP
+    /// with a sliding window. Returns true if the request should be blocked.
+    struct RateLimiter {
+        /// Map of IP -> list of failure timestamps
+        failures: Mutex<HashMap<String, Vec<Instant>>>,
+        max_failures: usize,
+        window: std::time::Duration,
+    }
+
+    impl RateLimiter {
+        fn new(max_failures: usize, window_secs: u64) -> Self {
+            Self {
+                failures: Mutex::new(HashMap::new()),
+                max_failures,
+                window: std::time::Duration::from_secs(window_secs),
+            }
+        }
+
+        /// Check if this IP is rate limited. Returns true if blocked.
+        fn is_blocked(&self, ip: &str) -> bool {
+            let mut failures = self.failures.lock().unwrap();
+            if let Some(timestamps) = failures.get_mut(ip) {
+                let cutoff = Instant::now() - self.window;
+                timestamps.retain(|t| *t > cutoff);
+                timestamps.len() >= self.max_failures
+            } else {
+                false
+            }
+        }
+
+        /// Record a failed auth attempt for this IP.
+        fn record_failure(&self, ip: &str) {
+            let mut failures = self.failures.lock().unwrap();
+            failures
+                .entry(ip.to_string())
+                .or_default()
+                .push(Instant::now());
+        }
+    }
 
     fn full_response(status: StatusCode, content_type: &str, body: String) -> Response<BoxBody> {
         Response::builder()
@@ -775,6 +1001,9 @@ async fn serve_http(
     let auth_dir = dirs_or_default();
     let auth_state = auth::AuthState::load_or_create(&auth_dir)?;
     let auth_state = Arc::new(auth_state);
+
+    // Rate limiter: max 10 failed auth attempts per IP per 5 minutes
+    let rate_limiter = Arc::new(RateLimiter::new(10, 300));
 
     let config = StreamableHttpServerConfig::default();
     let session_manager = Arc::new(
@@ -807,10 +1036,14 @@ async fn serve_http(
 
     // Build the request handler that routes between OAuth and MCP
     let make_handler = move |mcp_svc: StreamableHttpService<MemoriaServer>,
-                             auth: Arc<auth::AuthState>| {
+                             auth: Arc<auth::AuthState>,
+                             limiter: Arc<RateLimiter>,
+                             peer_ip: String| {
         move |req: Request<hyper::body::Incoming>| {
             let mcp_svc = mcp_svc.clone();
             let auth = auth.clone();
+            let limiter = limiter.clone();
+            let peer_ip = peer_ip.clone();
             async move {
                 let path = req.uri().path().to_string();
                 let method = req.method().clone();
@@ -853,8 +1086,19 @@ async fn serve_http(
                                 .unwrap_or_default()
                         };
 
+                        let client_id = get_param("client_id");
+
+                        // Reject unregistered clients before rendering the consent page
+                        if client_id != auth.client_id() {
+                            return Ok(full_response(
+                                StatusCode::BAD_REQUEST,
+                                "application/json",
+                                r#"{"error":"invalid_client"}"#.into(),
+                            ));
+                        }
+
                         let html = auth::authorize_page_html(
-                            &get_param("client_id"),
+                            &client_id,
                             &get_param("redirect_uri"),
                             &get_param("state"),
                             &get_param("scope"),
@@ -918,6 +1162,15 @@ async fn serve_http(
 
                     // OAuth: Token endpoint
                     (Method::POST, "/token") => {
+                        // Rate limit check
+                        if limiter.is_blocked(&peer_ip) {
+                            return Ok(full_response(
+                                StatusCode::TOO_MANY_REQUESTS,
+                                "application/json",
+                                r#"{"error":"rate_limit_exceeded"}"#.into(),
+                            ));
+                        }
+
                         let body_bytes = req
                             .into_body()
                             .collect()
@@ -971,6 +1224,7 @@ async fn serve_http(
                             }
                             Err(e) => {
                                 tracing::warn!("Auth failed for client {}: {}", client_id, e);
+                                limiter.record_failure(&peer_ip);
                                 Ok(full_response(
                                     StatusCode::UNAUTHORIZED,
                                     "application/json",
@@ -982,6 +1236,15 @@ async fn serve_http(
 
                     // MCP endpoint — requires Bearer token
                     _ => {
+                        // Rate limit check
+                        if limiter.is_blocked(&peer_ip) {
+                            return Ok(full_response(
+                                StatusCode::TOO_MANY_REQUESTS,
+                                "text/plain",
+                                "Too many failed attempts. Try again later.".into(),
+                            ));
+                        }
+
                         let auth_header = req
                             .headers()
                             .get("authorization")
@@ -998,6 +1261,7 @@ async fn serve_http(
                                 let boxed = BodyExt::boxed(body);
                                 Ok(Response::from_parts(parts, boxed))
                             } else {
+                                limiter.record_failure(&peer_ip);
                                 Ok(full_response(
                                     StatusCode::UNAUTHORIZED,
                                     "text/plain",
@@ -1031,12 +1295,14 @@ async fn serve_http(
     };
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer_addr) = listener.accept().await?;
+        let peer_ip = peer_addr.ip().to_string();
         let tls_acceptor = tls_acceptor.clone();
         let svc = mcp_service.clone();
         let auth = auth_state.clone();
+        let limiter = rate_limiter.clone();
         tokio::spawn(async move {
-            let handler = make_handler(svc, auth);
+            let handler = make_handler(svc, auth, limiter, peer_ip);
             if let Some(tls_acceptor) = tls_acceptor {
                 let tls_stream = match tls_acceptor.accept(stream).await {
                     Ok(s) => s,

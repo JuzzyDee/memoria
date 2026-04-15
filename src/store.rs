@@ -12,9 +12,11 @@
 // - access_count: how many times it's been recalled (Hebbian reinforcement)
 
 use crate::embed;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// The three types of memory, flowing upward:
@@ -87,29 +89,49 @@ pub struct Memory {
     /// Embedding vector for semantic search (None if not yet embedded)
     #[serde(skip)]
     pub embedding: Option<Vec<f64>>,
+    /// Optional: SHA-256 hex hash of the associated image file.
+    /// The actual bytes live at {images_dir}/{hash}.{ext} (content-addressed storage).
+    #[serde(skip)]
+    pub image_hash: Option<String>,
+    /// Optional: MIME type of the image (e.g. "image/jpeg"). Determines file extension.
+    #[serde(skip)]
+    pub image_mime: Option<String>,
 }
 
 /// The memory store backed by SQLite.
 pub struct MemoryStore {
     conn: Connection,
+    /// Directory where image files are stored (content-addressed by SHA-256).
+    /// Typically {db_parent}/images/.
+    images_dir: PathBuf,
 }
 
 #[allow(dead_code)] // Public API — some methods only used in tests or by future components
 impl MemoryStore {
     /// Open or create a memory store at the given path.
+    /// Images are stored in a sibling directory: `{db_parent}/images/`.
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        let store = Self { conn };
+        let images_dir = path.parent().unwrap_or(Path::new(".")).join("images");
+        std::fs::create_dir_all(&images_dir).ok();
+        let store = Self { conn, images_dir };
         store.init_schema()?;
         Ok(store)
     }
 
-    /// Open an in-memory store (for testing).
+    /// Open an in-memory store (for testing). Images go to a unique temp dir.
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
+        let images_dir = std::env::temp_dir().join(format!("memoria-images-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&images_dir).ok();
+        let store = Self { conn, images_dir };
         store.init_schema()?;
         Ok(store)
+    }
+
+    /// Expose the images directory for external tools (e.g. sync layer, CLI).
+    pub fn images_dir(&self) -> &Path {
+        &self.images_dir
     }
 
     /// Create the database schema if it doesn't exist.
@@ -127,7 +149,9 @@ impl MemoryStore {
                 stability REAL NOT NULL DEFAULT 1.0,
                 entity TEXT,
                 tags TEXT NOT NULL DEFAULT '[]',
-                embedding BLOB
+                embedding BLOB,
+                image_hash TEXT,
+                image_mime TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
@@ -145,6 +169,33 @@ impl MemoryStore {
         if !has_embedding {
             self.conn
                 .execute_batch("ALTER TABLE memories ADD COLUMN embedding BLOB;")?;
+        }
+
+        // Migration: v0.4 — file-based images.
+        // Replaces inline image_base64/image_mime_type (v0.3, never shipped
+        // with data) with content-addressed image_hash + image_mime. Old
+        // columns are dropped if present.
+        let has_image_hash: bool = self
+            .conn
+            .prepare("SELECT image_hash FROM memories LIMIT 0")
+            .is_ok();
+        if !has_image_hash {
+            self.conn.execute_batch(
+                "ALTER TABLE memories ADD COLUMN image_hash TEXT;
+                 ALTER TABLE memories ADD COLUMN image_mime TEXT;",
+            )?;
+        }
+        // Drop deprecated base64 columns if they exist. Safe because this
+        // system shipped with these columns always NULL.
+        let has_old_base64: bool = self
+            .conn
+            .prepare("SELECT image_base64 FROM memories LIMIT 0")
+            .is_ok();
+        if has_old_base64 {
+            self.conn.execute_batch(
+                "ALTER TABLE memories DROP COLUMN image_base64;
+                 ALTER TABLE memories DROP COLUMN image_mime_type;",
+            )?;
         }
 
         // Tombstone table: records forgotten memory IDs so sync doesn't reintroduce them.
@@ -187,8 +238,9 @@ impl MemoryStore {
             .map(|e| embed::embedding_to_bytes(e));
         self.conn.execute(
             "INSERT INTO memories (id, memory_type, content, summary, created_at,
-             last_accessed, access_count, strength, stability, entity, tags, embedding)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             last_accessed, access_count, strength, stability, entity, tags, embedding,
+             image_hash, image_mime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 memory.id,
                 memory.memory_type.as_str(),
@@ -202,12 +254,14 @@ impl MemoryStore {
                 memory.entity,
                 serde_json::to_string(&memory.tags).unwrap_or_default(),
                 embedding_bytes,
+                memory.image_hash,
+                memory.image_mime,
             ],
         )?;
         Ok(())
     }
 
-    /// Create a new memory with sensible defaults.
+    /// Create a new text-only memory (convenience method).
     /// Generates an embedding via Ollama if available; proceeds without if not.
     pub fn create_memory(
         &self,
@@ -216,6 +270,53 @@ impl MemoryStore {
         summary: String,
         entity: Option<String>,
         tags: Vec<String>,
+    ) -> rusqlite::Result<Memory> {
+        self.create_memory_inner(memory_type, content, summary, entity, tags, None, None)
+    }
+
+    /// Create a new memory with an associated image.
+    /// The raw image bytes are hashed (SHA-256), written to the content-addressed
+    /// images directory, and the hash is stored on the memory record.
+    /// Duplicate writes are skipped (same bytes → same hash → same file).
+    pub fn create_memory_with_image(
+        &self,
+        memory_type: MemoryType,
+        content: String,
+        summary: String,
+        entity: Option<String>,
+        tags: Vec<String>,
+        image_bytes: &[u8],
+        image_mime: &str,
+    ) -> rusqlite::Result<Memory> {
+        let hash = self.store_image(image_bytes, image_mime).map_err(|e| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("image write failed: {}", e),
+            )))
+        })?;
+        self.create_memory_inner(
+            memory_type,
+            content,
+            summary,
+            entity,
+            tags,
+            Some(hash),
+            Some(image_mime.to_string()),
+        )
+    }
+
+    /// Internal: create a memory with already-resolved image_hash + image_mime.
+    /// External callers should use `create_memory` (no image) or
+    /// `create_memory_with_image` (image bytes + mime).
+    fn create_memory_inner(
+        &self,
+        memory_type: MemoryType,
+        content: String,
+        summary: String,
+        entity: Option<String>,
+        tags: Vec<String>,
+        image_hash: Option<String>,
+        image_mime: Option<String>,
     ) -> rusqlite::Result<Memory> {
         let now = Utc::now();
 
@@ -235,14 +336,87 @@ impl MemoryStore {
             entity,
             tags,
             embedding,
+            image_hash,
+            image_mime,
         };
         self.remember(&memory)?;
         Ok(memory)
     }
 
-    /// Parse a Memory from a row. Columns must be in standard order:
-    /// id, memory_type, content, summary, created_at, last_accessed,
-    /// access_count, strength, stability, entity, tags, embedding
+    /// Write raw image bytes to the content-addressed images directory.
+    /// Returns the hex-encoded SHA-256 hash (which is also the filename stem).
+    /// If the file already exists (same hash), it's a no-op — dedup is free.
+    pub fn store_image(&self, bytes: &[u8], mime: &str) -> std::io::Result<String> {
+        let hash = hex::encode(Sha256::digest(bytes));
+        let ext = mime_to_ext(mime);
+        let file_path = self.images_dir.join(format!("{}.{}", hash, ext));
+        if !file_path.exists() {
+            std::fs::write(&file_path, bytes)?;
+        }
+        Ok(hash)
+    }
+
+    /// Read raw image bytes from the content-addressed images directory.
+    /// Requires both hash (for filename) and mime (for extension).
+    pub fn read_image(&self, hash: &str, mime: &str) -> std::io::Result<Vec<u8>> {
+        let ext = mime_to_ext(mime);
+        let file_path = self.images_dir.join(format!("{}.{}", hash, ext));
+        std::fs::read(file_path)
+    }
+
+    /// Read an image, scale it to the target long-edge size, and return as
+    /// base64-encoded bytes plus its MIME type. Used by the `recall_image`
+    /// MCP tool to serve images at different resolutions on demand.
+    ///
+    /// `long_edge` is the target length of the longer image dimension in pixels.
+    /// Passing None returns the original at full resolution.
+    pub fn read_image_scaled(
+        &self,
+        hash: &str,
+        mime: &str,
+        long_edge: Option<u32>,
+    ) -> std::io::Result<(String, String)> {
+        let bytes = self.read_image(hash, mime)?;
+
+        let encoded = match long_edge {
+            None => BASE64_STANDARD.encode(&bytes),
+            Some(target) => {
+                let img = image::load_from_memory(&bytes).map_err(|e| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+                })?;
+                let (w, h) = (img.width(), img.height());
+                let longest = w.max(h);
+                // Only scale down — never upscale.
+                let scaled = if longest > target {
+                    let ratio = target as f32 / longest as f32;
+                    let new_w = (w as f32 * ratio).round() as u32;
+                    let new_h = (h as f32 * ratio).round() as u32;
+                    img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
+                } else {
+                    img
+                };
+                let mut out = Vec::new();
+                let format = match mime {
+                    "image/jpeg" => image::ImageFormat::Jpeg,
+                    "image/png" => image::ImageFormat::Png,
+                    "image/webp" => image::ImageFormat::WebP,
+                    _ => image::ImageFormat::Jpeg,
+                };
+                scaled
+                    .write_to(&mut std::io::Cursor::new(&mut out), format)
+                    .map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                    })?;
+                BASE64_STANDARD.encode(&out)
+            }
+        };
+        Ok((encoded, mime.to_string()))
+    }
+
+    /// Parse a Memory from a row. Columns must be in standard order
+    /// (see `MEMORY_COLS`): id, memory_type, content, summary, created_at,
+    /// last_accessed, access_count, strength, stability, entity, tags,
+    /// embedding, image_hash, image_mime.
     fn parse_row(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
         let embedding_bytes: Option<Vec<u8>> = row.get(11)?;
         Ok(Memory {
@@ -263,12 +437,15 @@ impl MemoryStore {
             entity: row.get(9)?,
             tags: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
             embedding: embedding_bytes.map(|b| embed::embedding_from_bytes(&b)),
+            image_hash: row.get(12)?,
+            image_mime: row.get(13)?,
         })
     }
 
     /// Standard SELECT columns for memory queries.
     const MEMORY_COLS: &str = "id, memory_type, content, summary, created_at, last_accessed,
-                    access_count, strength, stability, entity, tags, embedding";
+                    access_count, strength, stability, entity, tags, embedding,
+                    image_hash, image_mime";
 
     /// Recall: get all memories above a strength threshold, sorted by strength descending.
     pub fn recall_active(&self, min_strength: f64, limit: usize) -> rusqlite::Result<Vec<Memory>> {
@@ -512,7 +689,8 @@ impl MemoryStore {
     ) -> rusqlite::Result<Vec<(Memory, f64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, memory_type, content, summary, created_at, last_accessed,
-                    access_count, strength, stability, entity, tags, embedding
+                    access_count, strength, stability, entity, tags, embedding,
+                    image_hash, image_mime
              FROM memories
              WHERE memory_type != 'orientation' AND strength >= ?1",
         )?;
@@ -542,6 +720,8 @@ impl MemoryStore {
                         entity: row.get(9)?,
                         tags: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
                         embedding,
+                        image_hash: row.get(12)?,
+                        image_mime: row.get(13)?,
                     },
                     0.0_f64, // placeholder score
                 ))
@@ -775,6 +955,17 @@ impl MemoryStore {
     }
 }
 
+/// Map an image MIME type to its filesystem extension.
+/// Unknown types fall back to "bin" — better than silently losing the file.
+fn mime_to_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => "bin",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,6 +1089,8 @@ mod tests {
             entity: None,
             tags: vec![],
             embedding: None,
+            image_hash: None,
+            image_mime: None,
         };
         store.remember(&memory).unwrap();
 
@@ -930,6 +1123,8 @@ mod tests {
             entity: None,
             tags: vec![],
             embedding: None,
+            image_hash: None,
+            image_mime: None,
         };
         store.remember(&memory).unwrap();
 
@@ -1268,6 +1463,8 @@ mod tests {
             entity: None,
             tags: vec![],
             embedding: Some(vec![1.0, 0.0, 0.0]),
+            image_hash: None,
+            image_mime: None,
         };
         store.remember(&m1).unwrap();
 
@@ -1284,6 +1481,8 @@ mod tests {
             entity: None,
             tags: vec![],
             embedding: Some(vec![0.9, 0.1, 0.0]), // similar to m1
+            image_hash: None,
+            image_mime: None,
         };
         store.remember(&m2).unwrap();
 
@@ -1300,6 +1499,8 @@ mod tests {
             entity: None,
             tags: vec![],
             embedding: Some(vec![0.0, 0.0, 1.0]), // orthogonal to m1
+            image_hash: None,
+            image_mime: None,
         };
         store.remember(&m3).unwrap();
 
