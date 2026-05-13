@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-const OLLAMA_URL: &str = "http://localhost:11434/api/embeddings";
+const OLLAMA_URL: &str = "http://127.0.0.1:11434/api/embeddings";
 const MODEL: &str = "nomic-embed-text";
 
 /// An embedding vector.
