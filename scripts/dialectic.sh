@@ -48,7 +48,7 @@ if [ "$1" = "--verbose" ]; then
     VERBOSE_FLAG="--verbose"
 fi
 
-claude -p "$PROMPT" $MODEL_FLAG $VERBOSE_FLAG --allowedTools "mcp__memoria__recall,mcp__memoria__remember,mcp__memoria__reflect,mcp__memoria__reframe,mcp__memoria__forget,mcp__memoria__review"
+claude -p "$PROMPT" $MODEL_FLAG $VERBOSE_FLAG --allowedTools "mcp__memoria__recall,mcp__memoria__recall_check,mcp__memoria__recall_specific,mcp__memoria__recall_image,mcp__memoria__remember,mcp__memoria__reflect,mcp__memoria__reframe,mcp__memoria__forget,mcp__memoria__review"
 
 echo ""
 echo "═══ Dialectic processing complete ═══"

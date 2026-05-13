@@ -223,17 +223,16 @@ fn format_memory(m: &store::Memory) -> String {
     )
 }
 
-// TODO: uncomment when visual memory is ready for release
-// fn format_memory_with_image_hint(m: &store::Memory) -> String {
-//     let mut result = format_memory(m);
-//     if m.image_base64.is_some() {
-//         result.push_str(&format!(
-//             "  [has image — use recall_image(\"{}\") to view]\n",
-//             &m.id[..8]
-//         ));
-//     }
-//     result
-// }
+fn format_memory_with_image_hint(m: &store::Memory) -> String {
+    let mut result = format_memory(m);
+    if m.image_hash.is_some() {
+        result.push_str(&format!(
+            "  [has image — use recall_image(\"{}\") to view]\n",
+            &m.id[..8]
+        ));
+    }
+    result
+}
 
 #[tool_router]
 impl MemoriaServer {
@@ -310,7 +309,7 @@ impl MemoriaServer {
         if !orientation.is_empty() {
             result.push_str("── Orientation (always present) ──\n");
             for m in &orientation {
-                result.push_str(&format_memory(m));
+                result.push_str(&format_memory_with_image_hint(m));
             }
             result.push('\n');
         }
@@ -324,7 +323,7 @@ impl MemoriaServer {
         if !non_orientation.is_empty() {
             result.push_str("── Recalled Memories ──\n");
             for m in non_orientation {
-                result.push_str(&format_memory(m));
+                result.push_str(&format_memory_with_image_hint(m));
             }
         } else if orientation.is_empty() {
             result.push_str("No memories yet. This is a fresh start.\n");
@@ -454,7 +453,7 @@ impl MemoriaServer {
         );
 
         for m in &memories {
-            result.push_str(&format_memory(m));
+            result.push_str(&format_memory_with_image_hint(m));
             result.push('\n');
         }
 
@@ -483,7 +482,7 @@ impl MemoriaServer {
         };
 
         // Look up the memory to get its image_hash and image_mime
-        let memory = match store.get(&params.memory_id) {
+        let memory = match store.find_by_prefix(&params.memory_id) {
             Ok(Some(m)) => m,
             Ok(None) => {
                 return MultiContent(vec![Content::text(format!(

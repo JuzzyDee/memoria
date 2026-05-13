@@ -192,6 +192,41 @@ Use forget when:
 Orientation memories cannot be forgotten — they're the core of identity.
 The reason field helps the subconscious learn from pruning patterns over time.
 
+### Visual memory — remember and recall images
+
+Some memories have images. A photograph, a screenshot, a moment captured visually.
+
+**Storing an image with a memory:**
+```
+remember_with_image({
+  content: "what this image means and why it matters",
+  summary: "one-line description",
+  memory_type: "episodic",
+  entity: "optional",
+  tags: ["optional"],
+  image_base64: "<base64-encoded image bytes>",
+  image_mime: "image/jpeg"
+})
+```
+
+Images are stored content-addressed (SHA-256 hash) — the same image attached to
+multiple memories is stored once on disk. Supported types: JPEG, PNG, WebP.
+
+**Viewing an image from a memory:**
+When recall surfaces a memory with an attached image, you'll see:
+`[has image — use recall_image("a3f7b9...") to view]`
+
+```
+recall_image({
+  memory_id: "a3f7b9...",
+  resolution: "recall"
+})
+```
+
+Resolutions: `thumbnail` (240px), `recall` (720px, default), `full` (original).
+Images are scaled on-demand — stored at full resolution, served at whatever
+size the moment needs.
+
 ### When it matters — reflect as a conscious choice
 Reflect is your conscious decision to consolidate — not an automatic response to
 a conversation ending. Some conversations don't end (long-running contexts can
