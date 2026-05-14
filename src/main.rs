@@ -1308,20 +1308,42 @@ async fn serve_http(
                             .to_string();
 
                         if let Some(token) = auth_header.strip_prefix("Bearer ") {
-                            if auth.validate_token(token) {
-                                // Authenticated — pass to MCP handler
-                                // Convert BoxBody response to our BoxBody type
-                                let resp = mcp_svc.handle(req).await;
-                                let (parts, body) = resp.into_parts();
-                                let boxed = BodyExt::boxed(body);
-                                Ok(Response::from_parts(parts, boxed))
-                            } else {
-                                limiter.record_failure(&peer_ip);
-                                Ok(full_response(
-                                    StatusCode::UNAUTHORIZED,
-                                    "text/plain",
-                                    "Invalid or expired token".into(),
-                                ))
+                            match auth.validate_bearer(token) {
+                                auth::Outcome::OAuth => {
+                                    // Existing behaviour — full access for OAuth bearers.
+                                    let resp = mcp_svc.handle(req).await;
+                                    let (parts, body) = resp.into_parts();
+                                    let boxed = BodyExt::boxed(body);
+                                    Ok(Response::from_parts(parts, boxed))
+                                }
+                                auth::Outcome::ApiKey(info) => {
+                                    // Fail-closed for now. API key auth is mechanically
+                                    // verified (CLA-86 phase 2) but per-tool scope gating
+                                    // lands in phase 3. Until then, refuse rather than
+                                    // let an authenticated service key reach the full
+                                    // tool surface.
+                                    tracing::warn!(
+                                        "API key auth accepted but blocked pending scope gates \
+                                         (CLA-86 phase 3). role={:?} key_id={}",
+                                        info.role,
+                                        info.key_id,
+                                    );
+                                    Ok(full_response(
+                                        StatusCode::FORBIDDEN,
+                                        "text/plain",
+                                        "API key authenticated; per-tool scope gating not yet \
+                                         implemented (CLA-86 phase 3 pending). Refusing for safety."
+                                            .into(),
+                                    ))
+                                }
+                                auth::Outcome::Unauthenticated => {
+                                    limiter.record_failure(&peer_ip);
+                                    Ok(full_response(
+                                        StatusCode::UNAUTHORIZED,
+                                        "text/plain",
+                                        "Invalid or expired token".into(),
+                                    ))
+                                }
                             }
                         } else {
                             // No token — tell client to authenticate

@@ -19,6 +19,8 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::api_key;
+
 /// Stored credentials — client_id and hashed secret.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StoredCredentials {
@@ -49,6 +51,25 @@ pub struct AuthState {
     active_tokens: Arc<RwLock<Vec<ActiveToken>>>,
     pending_codes: Arc<RwLock<Vec<PendingCode>>>,
     token_secret: Arc<Vec<u8>>, // HMAC key for token generation
+    /// Configured service API keys (loaded from MEMORIA_API_KEYS env at
+    /// startup). Empty unless service-key auth is configured. See
+    /// [`crate::api_key`] for the security design.
+    api_keys: Arc<Vec<api_key::ApiKeyEntry>>,
+}
+
+/// Outcome of validating an incoming Bearer token against both the OAuth
+/// path and the service API key path. Distinct variants let the caller
+/// apply role-based scope gating to API-key callers in a later phase.
+#[derive(Debug, Clone)]
+pub enum Outcome {
+    /// Valid OAuth Bearer token. Authenticates a user-facing client (Claude
+    /// Code / Web / iOS via Anthropic's MCP connector) with full tool access.
+    OAuth,
+    /// Valid service API key. Role + key_id flow through for scope gating
+    /// (CLA-86 phase 3) and audit logging (phase 6).
+    ApiKey(api_key::ApiKeyAuth),
+    /// Bearer was invalid, expired, or absent.
+    Unauthenticated,
 }
 
 impl AuthState {
@@ -114,11 +135,21 @@ impl AuthState {
             key
         };
 
+        let api_keys = api_key::load_from_env()
+            .map_err(|e| format!("Failed to load MEMORIA_API_KEYS: {}", e))?;
+        if !api_keys.is_empty() {
+            tracing::info!(
+                "Loaded {} service API key(s) from MEMORIA_API_KEYS",
+                api_keys.len()
+            );
+        }
+
         Ok(Self {
             credentials: Arc::new(credentials),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
             pending_codes: Arc::new(RwLock::new(Vec::new())),
             token_secret: Arc::new(token_secret),
+            api_keys: Arc::new(api_keys),
         })
     }
 
@@ -173,6 +204,24 @@ impl AuthState {
         tokens
             .iter()
             .any(|t| t.token == token && t.expires_at > now)
+    }
+
+    /// Validate a Bearer token via either the OAuth path or the service API
+    /// key path. OAuth is checked first because it's a fast in-memory token
+    /// lookup; API key verify is argon2 (~50ms) so paying that on every OAuth
+    /// request would be wasteful.
+    ///
+    /// Returns [`Outcome::OAuth`] for OAuth bearers, [`Outcome::ApiKey`] (with
+    /// role + key_id) for service-key bearers, or [`Outcome::Unauthenticated`]
+    /// when neither path matches.
+    pub fn validate_bearer(&self, token: &str) -> Outcome {
+        if self.validate_token(token) {
+            return Outcome::OAuth;
+        }
+        if let Some(auth) = api_key::verify_api_key(token, &self.api_keys) {
+            return Outcome::ApiKey(auth);
+        }
+        Outcome::Unauthenticated
     }
 
     /// Generate an HMAC-signed token.

@@ -19,7 +19,7 @@
 //
 // This file currently implements phase 1: key generation and the Role enum.
 
-use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
@@ -66,11 +66,111 @@ pub struct GeneratedKey {
 }
 
 impl GeneratedKey {
-    /// Format suitable for the MEMORIA_API_KEYS env var: `<role>:<hash>`,
-    /// with comma separation between entries.
+    /// Format suitable for the MEMORIA_API_KEYS env var: `<role>:<hash>`.
+    /// Multiple entries are joined with `;` (semicolon) — not comma —
+    /// because argon2 PHC strings contain commas in their params section.
     pub fn env_entry(&self) -> String {
         format!("{}:{}", self.role.as_str(), self.hash)
     }
+}
+
+/// A configured API key entry, as loaded from `MEMORIA_API_KEYS`. Stored
+/// hash only — the raw key is mathematically unrecoverable. Constructed
+/// by `load_from_env`.
+#[derive(Debug, Clone)]
+pub struct ApiKeyEntry {
+    pub role: Role,
+    /// Argon2id hash string (PHC format).
+    pub hash: String,
+}
+
+/// Result of a successful API key verification — identifies the authenticated
+/// caller for downstream scope checks (phase 3) and audit logging (phase 6).
+#[derive(Debug, Clone)]
+pub struct ApiKeyAuth {
+    pub role: Role,
+    /// Stable identifier derived from the bearer (SHA-256 prefix), useful
+    /// for audit logs that should never log the raw key.
+    pub key_id: String,
+}
+
+/// Load and parse API key entries from the `MEMORIA_API_KEYS` env var.
+///
+/// Format: **semicolon-separated** list of `<role>:<argon2-hash>` entries.
+/// (Not comma-separated: argon2 PHC hashes contain commas in their params
+/// section, e.g. `m=19456,t=2,p=1`, so comma would collide.) Whitespace
+/// around entries is tolerated. Empty / unset env var → empty list (no
+/// service-key auth configured, only OAuth available). A malformed entry
+/// is a hard error — fail loudly at startup rather than silently disable
+/// keys at runtime.
+///
+/// Example:
+/// ```text
+/// MEMORIA_API_KEYS="rover:$argon2id$v=19$m=19456,t=2,p=1$AAA$BBB;rover:$argon2id$v=19$m=19456,t=2,p=1$CCC$DDD"
+/// ```
+pub fn load_from_env() -> Result<Vec<ApiKeyEntry>, String> {
+    let raw = std::env::var("MEMORIA_API_KEYS").unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    parse_entries(&raw)
+}
+
+fn parse_entries(raw: &str) -> Result<Vec<ApiKeyEntry>, String> {
+    let mut entries = Vec::new();
+    for (idx, segment) in raw.split(';').enumerate() {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let (role_str, hash) = segment.split_once(':').ok_or_else(|| {
+            format!(
+                "MEMORIA_API_KEYS[{}]: malformed entry, expected `<role>:<hash>`",
+                idx
+            )
+        })?;
+        let role = Role::from_str(role_str.trim())
+            .ok_or_else(|| format!("MEMORIA_API_KEYS[{}]: unknown role: {}", idx, role_str))?;
+        let hash = hash.trim().to_string();
+        // Sanity-check the hash parses as a valid PHC string at load time —
+        // catches typos and malformed env values before they cause silent
+        // verify failures at request time.
+        PasswordHash::new(&hash)
+            .map_err(|e| format!("MEMORIA_API_KEYS[{}]: invalid argon2 hash: {}", idx, e))?;
+        entries.push(ApiKeyEntry { role, hash });
+    }
+    Ok(entries)
+}
+
+/// Verify a bearer token against the configured API key entries.
+///
+/// Returns `Some(ApiKeyAuth)` if the bearer matches one of the entries,
+/// `None` otherwise. Argon2 verification is intentionally slow (~50ms);
+/// with the rover's ~1 request per 12s heartbeat plus a small entry list,
+/// linear scan is well within budget. If the entry count grows, revisit.
+///
+/// This function never panics. Malformed entries (which shouldn't reach
+/// here because `load_from_env` validates) are silently skipped during
+/// verification.
+pub fn verify_api_key(bearer: &str, entries: &[ApiKeyEntry]) -> Option<ApiKeyAuth> {
+    for entry in entries {
+        let parsed = match PasswordHash::new(&entry.hash) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if Argon2::default()
+            .verify_password(bearer.as_bytes(), &parsed)
+            .is_ok()
+        {
+            let digest = Sha256::digest(bearer.as_bytes());
+            let key_id = hex::encode(&digest[..4]);
+            return Some(ApiKeyAuth {
+                role: entry.role,
+                key_id,
+            });
+        }
+    }
+    None
 }
 
 /// Generate a new service API key for the given role.
@@ -129,7 +229,7 @@ pub fn print_generated_key(key: &GeneratedKey) {
     eprintln!();
     eprintln!("    {}", key.raw);
     eprintln!();
-    eprintln!("  Hash entry — add to memoria's MEMORIA_API_KEYS (comma-separated):");
+    eprintln!("  Hash entry — add to memoria's MEMORIA_API_KEYS (semicolon-separated):");
     eprintln!();
     eprintln!("    {}", key.env_entry());
     eprintln!();
@@ -140,7 +240,6 @@ pub fn print_generated_key(key: &GeneratedKey) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use argon2::{PasswordHash, PasswordVerifier};
 
     #[test]
     fn role_round_trip() {
@@ -208,5 +307,123 @@ mod tests {
         let entry = key.env_entry();
         assert!(entry.starts_with("rover:"));
         assert!(entry.contains(&key.hash));
+    }
+
+    #[test]
+    fn parse_entries_empty() {
+        assert!(parse_entries("").unwrap().is_empty());
+        assert!(parse_entries("   ").unwrap().is_empty());
+        assert!(parse_entries(";;;").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_entries_single() {
+        let key = generate_api_key(Role::Rover).unwrap();
+        let entries = parse_entries(&key.env_entry()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].role, Role::Rover);
+        assert_eq!(entries[0].hash, key.hash);
+    }
+
+    #[test]
+    fn parse_entries_multiple() {
+        let a = generate_api_key(Role::Rover).unwrap();
+        let b = generate_api_key(Role::Rover).unwrap();
+        let combined = format!("{};{}", a.env_entry(), b.env_entry());
+        let entries = parse_entries(&combined).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].hash, a.hash);
+        assert_eq!(entries[1].hash, b.hash);
+    }
+
+    #[test]
+    fn parse_entries_tolerates_whitespace() {
+        let key = generate_api_key(Role::Rover).unwrap();
+        let padded = format!("  {}  ;  ", key.env_entry());
+        let entries = parse_entries(&padded).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].hash, key.hash);
+    }
+
+    #[test]
+    fn parse_entries_argon2_commas_dont_split() {
+        // Regression: argon2 PHC strings contain commas in m=...,t=...,p=...
+        // The separator must be `;` not `,` so the hash stays intact.
+        let key = generate_api_key(Role::Rover).unwrap();
+        assert!(key.hash.contains(','), "argon2 hash should contain commas");
+        let entries = parse_entries(&key.env_entry()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].hash, key.hash);
+    }
+
+    #[test]
+    fn parse_entries_rejects_missing_colon() {
+        let err = parse_entries("rover_no_colon_here").unwrap_err();
+        assert!(err.contains("malformed"));
+    }
+
+    #[test]
+    fn parse_entries_rejects_unknown_role() {
+        let key = generate_api_key(Role::Rover).unwrap();
+        // Swap "rover" for "admin" in the entry — same valid hash, wrong role
+        let bad = key.env_entry().replacen("rover:", "admin:", 1);
+        let err = parse_entries(&bad).unwrap_err();
+        assert!(err.contains("unknown role"));
+    }
+
+    #[test]
+    fn parse_entries_rejects_malformed_hash() {
+        let err = parse_entries("rover:not-an-argon2-hash").unwrap_err();
+        assert!(err.contains("invalid argon2 hash"));
+    }
+
+    #[test]
+    fn verify_api_key_success() {
+        let key = generate_api_key(Role::Rover).unwrap();
+        let entries = vec![ApiKeyEntry {
+            role: key.role,
+            hash: key.hash.clone(),
+        }];
+        let auth = verify_api_key(&key.raw, &entries).expect("should verify");
+        assert_eq!(auth.role, Role::Rover);
+        assert_eq!(auth.key_id, key.key_id);
+    }
+
+    #[test]
+    fn verify_api_key_rejects_wrong_bearer() {
+        let key = generate_api_key(Role::Rover).unwrap();
+        let entries = vec![ApiKeyEntry {
+            role: key.role,
+            hash: key.hash.clone(),
+        }];
+        assert!(verify_api_key("mk_rover_wrong", &entries).is_none());
+        assert!(verify_api_key("", &entries).is_none());
+        assert!(verify_api_key("not-a-key-at-all", &entries).is_none());
+    }
+
+    #[test]
+    fn verify_api_key_empty_entries() {
+        let key = generate_api_key(Role::Rover).unwrap();
+        assert!(verify_api_key(&key.raw, &[]).is_none());
+    }
+
+    #[test]
+    fn verify_api_key_picks_correct_entry_in_multi() {
+        let a = generate_api_key(Role::Rover).unwrap();
+        let b = generate_api_key(Role::Rover).unwrap();
+        let entries = vec![
+            ApiKeyEntry {
+                role: a.role,
+                hash: a.hash.clone(),
+            },
+            ApiKeyEntry {
+                role: b.role,
+                hash: b.hash.clone(),
+            },
+        ];
+        let auth = verify_api_key(&b.raw, &entries).expect("should verify against entry b");
+        assert_eq!(auth.key_id, b.key_id);
+        let auth = verify_api_key(&a.raw, &entries).expect("should verify against entry a");
+        assert_eq!(auth.key_id, a.key_id);
     }
 }
