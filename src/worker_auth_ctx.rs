@@ -116,10 +116,20 @@ fn parse_inline(raw: &str) -> Vec<ApiKeyEntry> {
         .collect()
 }
 
-/// Validate a Bearer token. Returns the AuthCtx if it matches a configured
-/// API key. Phase 5a covers service keys only; OAuth resolution lands in
-/// 5b (KV-backed token lookup).
-pub fn validate_bearer(env: &Env, bearer: &str) -> Option<AuthCtx> {
+/// Validate a Bearer token. Two paths:
+///   1. OAuth — `mem_<hex>` format, looked up in KV.
+///   2. Service API key — `mk_<role>_<rand>` format, argon2-verified
+///      against MEMORIA_API_KEYS.
+/// The OAuth check is async (KV lookup); the API key check is sync.
+pub async fn validate_bearer(env: &Env, bearer: &str) -> Option<AuthCtx> {
+    if crate::worker_oauth::looks_like_oauth_token(bearer) {
+        if let Ok(true) = crate::worker_oauth::validate_token(env, bearer).await {
+            return Some(AuthCtx::OAuth);
+        }
+        // OAuth lookup failed — don't fall through to API key path,
+        // returning None here lets the caller send 401.
+        return None;
+    }
     let entries = entries(env);
     let auth = api_key::verify_api_key(bearer, entries)?;
     Some(AuthCtx::ApiKey {
