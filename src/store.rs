@@ -96,6 +96,13 @@ pub struct Memory {
     /// Optional: MIME type of the image (e.g. "image/jpeg"). Determines file extension.
     #[serde(skip)]
     pub image_mime: Option<String>,
+    /// Optional: provenance — who or what recorded this memory.
+    /// Server-controlled (set from auth context); any client-supplied value
+    /// is ignored to prevent forgery.
+    ///   "claude" — written by a Claude instance via OAuth
+    ///   "rover"  — written by the rover via its service API key
+    ///   None     — pre-CLA-86 legacy memory, or a local stdio write
+    pub recorded_by: Option<String>,
 }
 
 /// The memory store backed by SQLite.
@@ -151,7 +158,8 @@ impl MemoryStore {
                 tags TEXT NOT NULL DEFAULT '[]',
                 embedding BLOB,
                 image_hash TEXT,
-                image_mime TEXT
+                image_mime TEXT,
+                recorded_by TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
@@ -198,6 +206,19 @@ impl MemoryStore {
             )?;
         }
 
+        // Migration: CLA-86 phase 4 — provenance / recorded_by column.
+        // Server-controlled per-memory source ("claude" via OAuth, "rover"
+        // via service API key, NULL for legacy / local stdio writes).
+        // See Memory::recorded_by docs.
+        let has_recorded_by: bool = self
+            .conn
+            .prepare("SELECT recorded_by FROM memories LIMIT 0")
+            .is_ok();
+        if !has_recorded_by {
+            self.conn
+                .execute_batch("ALTER TABLE memories ADD COLUMN recorded_by TEXT;")?;
+        }
+
         // Tombstone table: records forgotten memory IDs so sync doesn't reintroduce them.
         // When a memory is forgotten on one device, the tombstone prevents it from
         // being re-imported from another device's database during merge sync.
@@ -239,8 +260,8 @@ impl MemoryStore {
         self.conn.execute(
             "INSERT INTO memories (id, memory_type, content, summary, created_at,
              last_accessed, access_count, strength, stability, entity, tags, embedding,
-             image_hash, image_mime)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             image_hash, image_mime, recorded_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 memory.id,
                 memory.memory_type.as_str(),
@@ -256,6 +277,7 @@ impl MemoryStore {
                 embedding_bytes,
                 memory.image_hash,
                 memory.image_mime,
+                memory.recorded_by,
             ],
         )?;
         Ok(())
@@ -263,6 +285,11 @@ impl MemoryStore {
 
     /// Create a new text-only memory (convenience method).
     /// Generates an embedding via Ollama if available; proceeds without if not.
+    ///
+    /// **No provenance** — the resulting memory's `recorded_by` is `None`.
+    /// Used by local code paths (tests, consolidator-internal calls). HTTP
+    /// request handlers should call [`Self::create_memory_with_provenance`]
+    /// instead, passing the value from [`crate::auth_ctx::current_recorded_by`].
     pub fn create_memory(
         &self,
         memory_type: MemoryType,
@@ -271,13 +298,46 @@ impl MemoryStore {
         entity: Option<String>,
         tags: Vec<String>,
     ) -> rusqlite::Result<Memory> {
-        self.create_memory_inner(memory_type, content, summary, entity, tags, None, None)
+        self.create_memory_inner(memory_type, content, summary, entity, tags, None, None, None)
+    }
+
+    /// Like [`Self::create_memory`] but records a provenance label
+    /// (`recorded_by`). Used by request handlers reaching the store from the
+    /// HTTP/MCP path.
+    ///
+    /// `recorded_by` is `"claude"` for OAuth-authenticated callers, `"rover"`
+    /// for service-API-key-authenticated callers, `Some("rem")` for the
+    /// consolidator, or `None` for local/legacy writes. The value **must**
+    /// be derived server-side from the auth context; clients cannot supply
+    /// their own.
+    pub fn create_memory_with_provenance(
+        &self,
+        memory_type: MemoryType,
+        content: String,
+        summary: String,
+        entity: Option<String>,
+        tags: Vec<String>,
+        recorded_by: Option<String>,
+    ) -> rusqlite::Result<Memory> {
+        self.create_memory_inner(
+            memory_type,
+            content,
+            summary,
+            entity,
+            tags,
+            None,
+            None,
+            recorded_by,
+        )
     }
 
     /// Create a new memory with an associated image.
     /// The raw image bytes are hashed (SHA-256), written to the content-addressed
     /// images directory, and the hash is stored on the memory record.
     /// Duplicate writes are skipped (same bytes → same hash → same file).
+    ///
+    /// **No provenance** — see [`Self::create_memory_with_image_and_provenance`]
+    /// for the HTTP-handler variant.
     pub fn create_memory_with_image(
         &self,
         memory_type: MemoryType,
@@ -287,6 +347,30 @@ impl MemoryStore {
         tags: Vec<String>,
         image_bytes: &[u8],
         image_mime: &str,
+    ) -> rusqlite::Result<Memory> {
+        self.create_memory_with_image_and_provenance(
+            memory_type,
+            content,
+            summary,
+            entity,
+            tags,
+            image_bytes,
+            image_mime,
+            None,
+        )
+    }
+
+    /// Like [`Self::create_memory_with_image`] but records a provenance label.
+    pub fn create_memory_with_image_and_provenance(
+        &self,
+        memory_type: MemoryType,
+        content: String,
+        summary: String,
+        entity: Option<String>,
+        tags: Vec<String>,
+        image_bytes: &[u8],
+        image_mime: &str,
+        recorded_by: Option<String>,
     ) -> rusqlite::Result<Memory> {
         let hash = self.store_image(image_bytes, image_mime).map_err(|e| {
             rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
@@ -302,6 +386,7 @@ impl MemoryStore {
             tags,
             Some(hash),
             Some(image_mime.to_string()),
+            recorded_by,
         )
     }
 
@@ -317,6 +402,7 @@ impl MemoryStore {
         tags: Vec<String>,
         image_hash: Option<String>,
         image_mime: Option<String>,
+        recorded_by: Option<String>,
     ) -> rusqlite::Result<Memory> {
         let now = Utc::now();
 
@@ -338,6 +424,7 @@ impl MemoryStore {
             embedding,
             image_hash,
             image_mime,
+            recorded_by,
         };
         self.remember(&memory)?;
         Ok(memory)
@@ -416,7 +503,7 @@ impl MemoryStore {
     /// Parse a Memory from a row. Columns must be in standard order
     /// (see `MEMORY_COLS`): id, memory_type, content, summary, created_at,
     /// last_accessed, access_count, strength, stability, entity, tags,
-    /// embedding, image_hash, image_mime.
+    /// embedding, image_hash, image_mime, recorded_by.
     fn parse_row(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
         let embedding_bytes: Option<Vec<u8>> = row.get(11)?;
         Ok(Memory {
@@ -439,13 +526,14 @@ impl MemoryStore {
             embedding: embedding_bytes.map(|b| embed::embedding_from_bytes(&b)),
             image_hash: row.get(12)?,
             image_mime: row.get(13)?,
+            recorded_by: row.get(14)?,
         })
     }
 
     /// Standard SELECT columns for memory queries.
     const MEMORY_COLS: &str = "id, memory_type, content, summary, created_at, last_accessed,
                     access_count, strength, stability, entity, tags, embedding,
-                    image_hash, image_mime";
+                    image_hash, image_mime, recorded_by";
 
     /// Recall: get all memories above a strength threshold, sorted by strength descending.
     pub fn recall_active(&self, min_strength: f64, limit: usize) -> rusqlite::Result<Vec<Memory>> {
@@ -690,7 +778,7 @@ impl MemoryStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, memory_type, content, summary, created_at, last_accessed,
                     access_count, strength, stability, entity, tags, embedding,
-                    image_hash, image_mime
+                    image_hash, image_mime, recorded_by
              FROM memories
              WHERE memory_type != 'orientation' AND strength >= ?1",
         )?;
@@ -722,6 +810,7 @@ impl MemoryStore {
                         embedding,
                         image_hash: row.get(12)?,
                         image_mime: row.get(13)?,
+                        recorded_by: row.get(14)?,
                     },
                     0.0_f64, // placeholder score
                 ))
@@ -914,12 +1003,19 @@ impl MemoryStore {
                 let stability =
                     MemoryType::Semantic.base_stability() * 1.4_f64.powi(combined_access as i32);
 
-                let memory = self.create_memory(
+                // Consolidated semantic memories carry "rem" as their
+                // recorded_by — they're synthesized by the memoria-rem
+                // background consolidator, not written directly by any client.
+                // Distinct from "claude" (OAuth-recorded) and "rover" (service
+                // API key) so future audits can attribute consolidations
+                // specifically.
+                let memory = self.create_memory_with_provenance(
                     MemoryType::Semantic,
                     merged_content,
                     merged_summary,
                     entity,
                     tags,
+                    Some("rem".to_string()),
                 )?;
 
                 // Boost the new memory's stability based on parent history
@@ -988,6 +1084,88 @@ mod tests {
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].summary, "v1.0.0 release day");
         assert_eq!(memories[0].strength, 1.0);
+    }
+
+    // ---- CLA-86 phase 4: recorded_by (provenance) ----
+
+    #[test]
+    fn create_memory_has_no_provenance() {
+        // The base `create_memory` is used by local code paths that don't
+        // carry a provenance signal (tests, consolidator-internal calls).
+        // Resulting memories have `recorded_by = None`, matching legacy.
+        let store = MemoryStore::open_in_memory().unwrap();
+        let m = store
+            .create_memory(
+                MemoryType::Episodic,
+                "no provenance".into(),
+                "ok".into(),
+                None,
+                vec![],
+            )
+            .unwrap();
+        let fetched = store.get(&m.id).unwrap().unwrap();
+        assert_eq!(fetched.recorded_by, None);
+    }
+
+    #[test]
+    fn create_memory_with_provenance_persists() {
+        // create_memory_with_provenance is the HTTP-handler entry point —
+        // verify the recorded_by label survives the round trip through
+        // SQLite serialisation.
+        let store = MemoryStore::open_in_memory().unwrap();
+        let m = store
+            .create_memory_with_provenance(
+                MemoryType::Episodic,
+                "rover saw a kookaburra".into(),
+                "kookaburra spotted".into(),
+                None,
+                vec![],
+                Some("rover".to_string()),
+            )
+            .unwrap();
+        let fetched = store.get(&m.id).unwrap().unwrap();
+        assert_eq!(fetched.recorded_by, Some("rover".to_string()));
+    }
+
+    #[test]
+    fn entity_and_recorded_by_are_independent() {
+        // The whole point of the entity/recorded_by split: the rover can
+        // truthfully record a memory ABOUT Justin while having been the
+        // one to record it. These are two orthogonal dimensions, not one.
+        let store = MemoryStore::open_in_memory().unwrap();
+        let m = store
+            .create_memory_with_provenance(
+                MemoryType::Episodic,
+                "Justin walked past the rover today, smiling".into(),
+                "saw Justin".into(),
+                Some("justin".to_string()), // subject
+                vec![],
+                Some("rover".to_string()), // source
+            )
+            .unwrap();
+        let fetched = store.get(&m.id).unwrap().unwrap();
+        assert_eq!(fetched.entity, Some("justin".to_string()));
+        assert_eq!(fetched.recorded_by, Some("rover".to_string()));
+    }
+
+    #[test]
+    fn recorded_by_survives_recall() {
+        // Recall paths must also surface recorded_by — not just direct
+        // by-id lookups. Verify recall_active includes the provenance.
+        let store = MemoryStore::open_in_memory().unwrap();
+        store
+            .create_memory_with_provenance(
+                MemoryType::Episodic,
+                "rover beat #1234".into(),
+                "beat".into(),
+                None,
+                vec![],
+                Some("rover".to_string()),
+            )
+            .unwrap();
+        let memories = store.recall_active(0.5, 10).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].recorded_by, Some("rover".to_string()));
     }
 
     #[test]
@@ -1091,6 +1269,7 @@ mod tests {
             embedding: None,
             image_hash: None,
             image_mime: None,
+            recorded_by: None,
         };
         store.remember(&memory).unwrap();
 
@@ -1125,6 +1304,7 @@ mod tests {
             embedding: None,
             image_hash: None,
             image_mime: None,
+            recorded_by: None,
         };
         store.remember(&memory).unwrap();
 
@@ -1465,6 +1645,7 @@ mod tests {
             embedding: Some(vec![1.0, 0.0, 0.0]),
             image_hash: None,
             image_mime: None,
+            recorded_by: None,
         };
         store.remember(&m1).unwrap();
 
@@ -1483,6 +1664,7 @@ mod tests {
             embedding: Some(vec![0.9, 0.1, 0.0]), // similar to m1
             image_hash: None,
             image_mime: None,
+            recorded_by: None,
         };
         store.remember(&m2).unwrap();
 
@@ -1501,6 +1683,7 @@ mod tests {
             embedding: Some(vec![0.0, 0.0, 1.0]), // orthogonal to m1
             image_hash: None,
             image_mime: None,
+            recorded_by: None,
         };
         store.remember(&m3).unwrap();
 

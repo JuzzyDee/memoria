@@ -37,6 +37,29 @@ tokio::task_local! {
     pub static AUTH_CTX: AuthCtx;
 }
 
+/// Return the value memoria should record as a memory's `recorded_by`
+/// based on the current auth context.
+///
+///   `AuthCtx::OAuth`   →  `Some("claude")`
+///   `AuthCtx::ApiKey`  →  `Some("<role-name>")` (e.g. `"rover"`)
+///   unset (stdio/test) →  `None`             — local trust, legacy-shaped
+///
+/// `None` is what legacy memories (pre-CLA-86) carry, so stdio writes
+/// continue to look identical to pre-migration memories. Remote writes
+/// always carry a real source.
+///
+/// **Forgery defense for tool handlers:** the value returned here is the
+/// only acceptable `recorded_by` — callers must use this and ignore any
+/// `recorded_by` field in the request body. That's the whole point.
+pub fn current_recorded_by() -> Option<String> {
+    AUTH_CTX
+        .try_with(|ctx| match ctx {
+            AuthCtx::OAuth => Some("claude".to_string()),
+            AuthCtx::ApiKey { role, .. } => Some(role.as_str().to_string()),
+        })
+        .unwrap_or(None)
+}
+
 /// Check whether the current auth context is permitted to invoke `tool`.
 ///
 /// Returns:
@@ -126,6 +149,33 @@ mod tests {
                 // Unknown tools default to forbidden (matches!(tool, "...") returns false)
                 assert!(check_scope("admin_dump_all").is_err());
                 assert!(check_scope("").is_err());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn current_recorded_by_unset() {
+        assert_eq!(current_recorded_by(), None);
+    }
+
+    #[tokio::test]
+    async fn current_recorded_by_oauth() {
+        AUTH_CTX
+            .scope(AuthCtx::OAuth, async {
+                assert_eq!(current_recorded_by(), Some("claude".to_string()));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn current_recorded_by_rover() {
+        let ctx = AuthCtx::ApiKey {
+            role: Role::Rover,
+            key_id: "deadbeef".to_string(),
+        };
+        AUTH_CTX
+            .scope(ctx, async {
+                assert_eq!(current_recorded_by(), Some("rover".to_string()));
             })
             .await;
     }

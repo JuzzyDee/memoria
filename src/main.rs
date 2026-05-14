@@ -591,7 +591,7 @@ impl MemoriaServer {
             Err(e) => return format!("Error decoding base64 image: {}", e),
         };
 
-        match store.create_memory_with_image(
+        match store.create_memory_with_image_and_provenance(
             memory_type,
             params.content,
             params.summary,
@@ -599,6 +599,7 @@ impl MemoriaServer {
             params.tags,
             &image_bytes,
             &params.image_mime,
+            auth_ctx::current_recorded_by(),
         ) {
             Ok(memory) => format!(
                 "✓ Remembered with image: {} (id: {}, image: {}...)",
@@ -690,12 +691,13 @@ impl MemoriaServer {
             }
         };
 
-        match store.create_memory(
+        match store.create_memory_with_provenance(
             memory_type,
             params.content,
             params.summary,
             params.entity,
             params.tags,
+            auth_ctx::current_recorded_by(),
         ) {
             Ok(m) => {
                 // Write-time co-activation: find semantically similar neighbours
@@ -845,12 +847,13 @@ impl MemoriaServer {
 
         // Store the conversation highlights as an episodic memory
         let summary_truncated: String = params.conversation_highlights.chars().take(80).collect();
-        match store.create_memory(
+        match store.create_memory_with_provenance(
             MemoryType::Episodic,
             params.conversation_highlights.clone(),
             format!("Conversation reflection: {}", summary_truncated),
             None,
             vec!["reflection".into()],
+            auth_ctx::current_recorded_by(),
         ) {
             Ok(m) => results.push(format!("  New episodic memory: {}", &m.id[..8])),
             Err(e) => results.push(format!("  Error storing reflection: {}", e)),
