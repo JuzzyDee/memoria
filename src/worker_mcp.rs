@@ -185,6 +185,52 @@ fn handle_tools_list() -> Value {
                     },
                     "required": ["content", "summary", "memory_type"]
                 }
+            },
+            {
+                "name": "remember_with_image",
+                "description": "Store a memory with an attached image. The image bytes (base64) \
+                                are content-addressed into R2 — duplicate uploads of the same \
+                                image are deduplicated automatically. Used primarily by the \
+                                rover heartbeat to record observations with the current camera \
+                                frame.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "content": { "type": "string" },
+                        "summary": { "type": "string" },
+                        "memory_type": {
+                            "type": "string",
+                            "enum": ["episodic", "semantic", "orientation"]
+                        },
+                        "entity": { "type": "string" },
+                        "tags": { "type": "array", "items": { "type": "string" } },
+                        "image_base64": {
+                            "type": "string",
+                            "description": "Base64-encoded image bytes (no data: URI prefix)."
+                        },
+                        "image_mime": {
+                            "type": "string",
+                            "description": "MIME type — image/jpeg, image/png, or image/webp."
+                        }
+                    },
+                    "required": ["content", "summary", "memory_type", "image_base64", "image_mime"]
+                }
+            },
+            {
+                "name": "recall_image",
+                "description": "Retrieve an image attached to a memory. Takes the memory's id \
+                                (full UUID or the 8-char prefix shown in recall output). Returns \
+                                MCP content with the memory's summary text and the image bytes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {
+                            "type": "string",
+                            "description": "Full UUID or 8-char prefix from a prior recall."
+                        }
+                    },
+                    "required": ["memory_id"]
+                }
             }
         ]
     })
@@ -208,16 +254,39 @@ async fn handle_tools_call(
     // Three-gate check (scope/rate/audit) before invoking the handler.
     worker_auth_ctx::check_scope(&db, &call.name).await?;
 
-    let text = match call.name.as_str() {
-        "recall" => tool_recall(env, &db, call.arguments).await?,
-        "remember" => tool_remember(env, &db, call.arguments).await?,
-        other => return Err(format!("unknown tool: {}", other)),
-    };
-
-    Ok(json!({
-        "content": [{ "type": "text", "text": text }],
-        "isError": false,
-    }))
+    // Two of the four tools return a single text content; the others return
+    // multi-part content (text + image). Branch on tool name accordingly.
+    match call.name.as_str() {
+        "recall" => {
+            let text = tool_recall(env, &db, call.arguments).await?;
+            Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            }))
+        }
+        "remember" => {
+            let text = tool_remember(env, &db, call.arguments).await?;
+            Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            }))
+        }
+        "remember_with_image" => {
+            let text = tool_remember_with_image(env, &db, call.arguments).await?;
+            Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            }))
+        }
+        "recall_image" => {
+            let content = tool_recall_image(env, &db, call.arguments).await?;
+            Ok(json!({
+                "content": content,
+                "isError": false,
+            }))
+        }
+        other => Err(format!("unknown tool: {}", other)),
+    }
 }
 
 #[derive(Deserialize)]
@@ -351,6 +420,137 @@ async fn tool_remember(
         memory.summary,
         &memory.id[..8]
     ))
+}
+
+#[derive(Deserialize)]
+struct RememberWithImageArgs {
+    content: String,
+    summary: String,
+    memory_type: String,
+    #[serde(default)]
+    entity: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    image_base64: String,
+    image_mime: String,
+}
+
+async fn tool_remember_with_image(
+    env: &Env,
+    db: &D1Database,
+    args: Value,
+) -> std::result::Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    let args: RememberWithImageArgs = serde_json::from_value(args)
+        .map_err(|e| format!("invalid remember_with_image args: {}", e))?;
+    let memory_type = MemoryType::from_str(&args.memory_type)
+        .ok_or_else(|| format!("unknown memory_type: {}", args.memory_type))?;
+
+    let bytes = BASE64
+        .decode(args.image_base64.as_bytes())
+        .map_err(|e| format!("invalid base64 image: {}", e))?;
+
+    let bucket = env
+        .bucket("IMAGES")
+        .map_err(|e| format!("IMAGES bucket binding: {:?}", e))?;
+
+    let recorded_by = worker_auth_ctx::current_recorded_by();
+
+    let memory = worker_store::create_memory_with_image_and_provenance(
+        db,
+        &bucket,
+        memory_type,
+        args.content.clone(),
+        args.summary,
+        args.entity,
+        args.tags,
+        bytes,
+        args.image_mime.clone(),
+        recorded_by,
+    )
+    .await
+    .map_err(|e| format!("create_memory_with_image: {:?}", e))?;
+
+    // Embed + upsert. The embedding describes the content, not the image —
+    // visual similarity is a future concern (would want CLIP-style embeds).
+    let embedding = worker_embed::embed_document(env, &args.content)
+        .await
+        .map_err(|e| format!("embed_document: {:?}", e))?;
+    worker_vectorize::upsert_one(env, &memory.id, &embedding)
+        .await
+        .map_err(|e| format!("vectorize upsert: {:?}", e))?;
+
+    Ok(format!(
+        "✓ Remembered with image: {} (id: {}, mime: {})",
+        memory.summary,
+        &memory.id[..8],
+        memory.image_mime.as_deref().unwrap_or("?")
+    ))
+}
+
+#[derive(Deserialize)]
+struct RecallImageArgs {
+    memory_id: String,
+}
+
+async fn tool_recall_image(
+    env: &Env,
+    db: &D1Database,
+    args: Value,
+) -> std::result::Result<Value, String> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    let args: RecallImageArgs =
+        serde_json::from_value(args).map_err(|e| format!("invalid recall_image args: {}", e))?;
+
+    let memory = worker_store::find_by_prefix(db, &args.memory_id)
+        .await
+        .map_err(|e| format!("find_by_prefix: {:?}", e))?;
+    let Some(memory) = memory else {
+        return Err(format!("No memory found for id `{}`", args.memory_id));
+    };
+    let Some(hash) = memory.image_hash.as_deref() else {
+        return Err(format!(
+            "Memory {} has no image attached.",
+            &memory.id[..8]
+        ));
+    };
+    let mime = memory.image_mime.as_deref().unwrap_or("image/jpeg");
+
+    let bucket = env
+        .bucket("IMAGES")
+        .map_err(|e| format!("IMAGES bucket binding: {:?}", e))?;
+    let bytes = worker_store::read_image_from_r2(&bucket, hash, mime)
+        .await
+        .map_err(|e| format!("read_image: {:?}", e))?
+        .ok_or_else(|| {
+            format!(
+                "Image bytes missing in R2 for hash {} (memory row points to a key that isn't there)",
+                hash
+            )
+        })?;
+
+    // Touch — recall_image counts as recall reinforcement.
+    let _ = worker_store::touch(db, &memory.id).await;
+
+    let encoded = BASE64.encode(&bytes);
+    Ok(json!([
+        {
+            "type": "text",
+            "text": format!(
+                "Image for memory {}: {}\n\n{}",
+                &memory.id[..8],
+                memory.summary,
+                memory.content
+            )
+        },
+        {
+            "type": "image",
+            "data": encoded,
+            "mimeType": mime,
+        }
+    ]))
 }
 
 /// Same shape as native main.rs::format_memory — keeps the recall output

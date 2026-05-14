@@ -61,6 +61,16 @@ index_name = "memoria-vectors"
 binding = "AI"
 
 # ──────────────────────────────────────────────────────────────────────
+# R2 — content-addressed image storage. Replaces the native filesystem
+# {db_parent}/images/{hash}.{ext} layout. Keys are `{hash}.{ext}` to
+# match the native convention, so a future export tool can recreate
+# the local directory shape directly.
+# ──────────────────────────────────────────────────────────────────────
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "memoria-images"
+
+# ──────────────────────────────────────────────────────────────────────
 # KV — OAuth access tokens. Replaces the in-memory Arc<RwLock<Vec>>
 # token cache that gets wiped on every server restart. Tokens have TTL
 # (7d matches current OAuth design); KV's TTL support fits naturally.

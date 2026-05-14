@@ -23,8 +23,9 @@
 
 use crate::memory::{Memory, MemoryType};
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use worker::{D1Database, Result};
+use worker::{Bucket, D1Database, Result};
 
 /// Row representation matching the D1 `memories` table schema. Serde
 /// deserializes D1 rows into this; `into_memory()` converts to the
@@ -469,6 +470,127 @@ pub async fn record_co_activation(db: &D1Database, ids: &[&str]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Map an image MIME type to a filesystem-style extension. Mirrors
+/// store::mime_to_ext on the native side so R2 keys and local
+/// filesystem paths line up exactly — useful for future export.
+fn mime_to_ext(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => "bin",
+    }
+}
+
+/// Content-addressed image upload. SHA-256 the bytes, write to R2 under
+/// `{hash}.{ext}` (no-op if the key already exists), return the hex hash.
+/// Mirrors store::store_image on the native side.
+pub async fn store_image_to_r2(
+    bucket: &Bucket,
+    bytes: Vec<u8>,
+    mime: &str,
+) -> Result<String> {
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let key = format!("{}.{}", hash, mime_to_ext(mime));
+    // Dedup: HEAD the key first, only write if missing. R2 PUT is
+    // idempotent (same key + same body) but the HEAD saves the bytes
+    // over the wire when we already have it.
+    if bucket.head(&key).await?.is_none() {
+        bucket.put(&key, bytes).execute().await?;
+    }
+    Ok(hash)
+}
+
+/// Fetch image bytes from R2 by hash + mime. Returns None when the key
+/// isn't present (e.g. orphaned memory row, or hash mismatch).
+pub async fn read_image_from_r2(
+    bucket: &Bucket,
+    hash: &str,
+    mime: &str,
+) -> Result<Option<Vec<u8>>> {
+    let key = format!("{}.{}", hash, mime_to_ext(mime));
+    let Some(obj) = bucket.get(&key).execute().await? else {
+        return Ok(None);
+    };
+    let Some(body) = obj.body() else {
+        return Ok(None);
+    };
+    Ok(Some(body.bytes().await?))
+}
+
+/// Create a memory with an associated image. Bytes go to R2 (content-
+/// addressed), the resulting hash goes into the memory row. Same
+/// provenance rules as `create_memory_with_provenance` —
+/// `recorded_by` is server-controlled.
+pub async fn create_memory_with_image_and_provenance(
+    db: &D1Database,
+    bucket: &Bucket,
+    memory_type: MemoryType,
+    content: String,
+    summary: String,
+    entity: Option<String>,
+    tags: Vec<String>,
+    image_bytes: Vec<u8>,
+    image_mime: String,
+    recorded_by: Option<String>,
+) -> Result<Memory> {
+    let hash = store_image_to_r2(bucket, image_bytes, &image_mime).await?;
+    let now = Utc::now();
+    let id = Uuid::new_v4().to_string();
+    let tags_json = serde_json::to_string(&tags).unwrap_or_else(|_| "[]".to_string());
+    let stability = memory_type.base_stability();
+
+    db.prepare(
+        "INSERT INTO memories
+            (id, memory_type, content, summary, created_at, last_accessed,
+             access_count, strength, stability, entity, tags, image_hash,
+             image_mime, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&[
+        id.clone().into(),
+        memory_type.as_str().into(),
+        content.clone().into(),
+        summary.clone().into(),
+        now.to_rfc3339().into(),
+        now.to_rfc3339().into(),
+        0i32.into(),
+        1.0_f64.into(),
+        stability.into(),
+        match &entity {
+            Some(e) => e.clone().into(),
+            None => worker::wasm_bindgen::JsValue::NULL,
+        },
+        tags_json.into(),
+        hash.clone().into(),
+        image_mime.clone().into(),
+        match &recorded_by {
+            Some(r) => r.clone().into(),
+            None => worker::wasm_bindgen::JsValue::NULL,
+        },
+    ])?
+    .run()
+    .await?;
+
+    Ok(Memory {
+        id,
+        memory_type,
+        content,
+        summary,
+        created_at: now,
+        last_accessed: now,
+        access_count: 0,
+        strength: 1.0,
+        stability,
+        entity,
+        tags,
+        embedding: None,
+        image_hash: Some(hash),
+        image_mime: Some(image_mime),
+        recorded_by,
+    })
 }
 
 /// Consolidate two parent memories into a new semantic one. Mirrors the
