@@ -17,12 +17,40 @@ mod memory;
 // Worker-side modules (wasm32-only).
 mod worker_store;
 
+use crate::memory::MemoryType;
 use worker::{event, Context, Env, Request, Response, Result};
 
 #[event(fetch)]
-async fn fetch(_req: Request, _env: Env, _ctx: Context) -> Result<Response> {
-    // Stub. Real routing lands in CLA-84 phase 6 (HTTP adapter).
-    // Until then, deploying this Worker returns a placeholder so we can
-    // confirm the build pipeline end-to-end.
-    Response::ok("memoria — Cloudflare migration in progress (CLA-84)")
+async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    let path = req.url()?.path().to_string();
+    match path.as_str() {
+        // Smoke-test endpoints for CLA-84 phase 2b.1 — exercise the D1
+        // binding from a deployed Worker. UNAUTHENTICATED on purpose for
+        // the smoke test; phase 6 replaces these with proper MCP routing
+        // gated by the OAuth + service-key bearer check from CLA-86.
+        "/test/create" => create_test_memory(&env).await,
+        "/test/list" => list_test_memories(&env).await,
+        _ => Response::ok("memoria — Cloudflare migration in progress (CLA-84)"),
+    }
+}
+
+async fn create_test_memory(env: &Env) -> Result<Response> {
+    let db = env.d1("DB")?;
+    let memory = worker_store::create_memory_with_provenance(
+        &db,
+        MemoryType::Episodic,
+        "Smoke test: a memory written by the deployed Worker via D1.".into(),
+        "CLA-84 phase 2b.1 smoke test".into(),
+        None,
+        vec!["cla-84".into(), "smoke-test".into()],
+        Some("claude".to_string()),
+    )
+    .await?;
+    Response::from_json(&memory)
+}
+
+async fn list_test_memories(env: &Env) -> Result<Response> {
+    let db = env.d1("DB")?;
+    let memories = worker_store::recall_active(&db, 0.0, 10).await?;
+    Response::from_json(&memories)
 }
