@@ -68,6 +68,12 @@ tracing = "0.1"
 [target.'cfg(target_family = "wasm")'.dependencies]
 worker = { version = "0.8", features = ["d1"] }
 serde-wasm-bindgen = "0.6"
+# Used directly by the hand-rolled Vectorize binding wrapper. Transitively
+# present via `worker`, but extern declarations + JsFuture calls need
+# direct dep statements to compile.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
 # Wasm32-unknown-unknown has no OS, so getrandom needs a JS shim for
 # entropy. Pulls into rand + uuid transitively. The `wasm_js` feature is
 # the modern (0.3+) name; older code uses `js`.
