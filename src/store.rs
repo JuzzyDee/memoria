@@ -219,6 +219,12 @@ impl MemoryStore {
                 .execute_batch("ALTER TABLE memories ADD COLUMN recorded_by TEXT;")?;
         }
 
+        // CLA-86 phase 6 — audit table for API-key authenticated calls.
+        // Every API-key-authed tool invocation writes a row here: success,
+        // scope violation, or rate limited. Indexed on timestamp + key_id
+        // for fast queries during incident review.
+        self.conn.execute_batch(crate::audit::SCHEMA_SQL)?;
+
         // Tombstone table: records forgotten memory IDs so sync doesn't reintroduce them.
         // When a memory is forgotten on one device, the tombstone prevents it from
         // being re-imported from another device's database during merge sync.

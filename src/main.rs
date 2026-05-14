@@ -17,9 +17,11 @@
 // 5. The reflection is the identity
 
 mod api_key;
+mod audit;
 mod auth;
 mod auth_ctx;
 mod embed;
+mod key_rate;
 mod store;
 
 use rmcp::{
@@ -1137,12 +1139,14 @@ async fn serve_http(
     let make_handler = move |mcp_svc: StreamableHttpService<MemoriaServer>,
                              auth: Arc<auth::AuthState>,
                              limiter: Arc<RateLimiter>,
-                             peer_ip: String| {
+                             peer_ip: String,
+                             db_path: PathBuf| {
         move |req: Request<hyper::body::Incoming>| {
             let mcp_svc = mcp_svc.clone();
             let auth = auth.clone();
             let limiter = limiter.clone();
             let peer_ip = peer_ip.clone();
+            let db_path = db_path.clone();
             async move {
                 let path = req.uri().path().to_string();
                 let method = req.method().clone();
@@ -1357,20 +1361,26 @@ async fn serve_http(
                                     // Full access via OAuth. AUTH_CTX is set so tool
                                     // handlers' check_scope() sees OAuth and allows
                                     // everything (matches the historical behaviour).
+                                    // DB_PATH is also set, but check_scope's audit
+                                    // path is a no-op for OAuth — audit is API-key
+                                    // specific.
                                     let ctx = auth_ctx::AuthCtx::OAuth;
                                     let resp = auth_ctx::AUTH_CTX
-                                        .scope(ctx, mcp_svc.handle(req))
+                                        .scope(
+                                            ctx,
+                                            auth_ctx::DB_PATH
+                                                .scope(db_path.clone(), mcp_svc.handle(req)),
+                                        )
                                         .await;
                                     let (parts, body) = resp.into_parts();
                                     let boxed = BodyExt::boxed(body);
                                     Ok(Response::from_parts(parts, boxed))
                                 }
                                 auth::Outcome::ApiKey(info) => {
-                                    // Scope-gated access via service API key. Each tool
-                                    // handler reads AUTH_CTX via check_scope() and
-                                    // returns Forbidden if the role's allowlist denies
-                                    // it. Phase 3 of CLA-86 unlocks this — phase 2's
-                                    // fail-closed 403 is gone.
+                                    // Scope-gated + rate-limited + audited access
+                                    // via service API key. check_scope enforces all
+                                    // three. DB_PATH is set so audit writes know
+                                    // where to land.
                                     tracing::info!(
                                         "Service API key auth — role={} key_id={}",
                                         info.role.as_str(),
@@ -1381,7 +1391,11 @@ async fn serve_http(
                                         key_id: info.key_id,
                                     };
                                     let resp = auth_ctx::AUTH_CTX
-                                        .scope(ctx, mcp_svc.handle(req))
+                                        .scope(
+                                            ctx,
+                                            auth_ctx::DB_PATH
+                                                .scope(db_path.clone(), mcp_svc.handle(req)),
+                                        )
                                         .await;
                                     let (parts, body) = resp.into_parts();
                                     let boxed = BodyExt::boxed(body);
@@ -1429,8 +1443,9 @@ async fn serve_http(
         let svc = mcp_service.clone();
         let auth = auth_state.clone();
         let limiter = rate_limiter.clone();
+        let db_path_for_conn = db_path.clone();
         tokio::spawn(async move {
-            let handler = make_handler(svc, auth, limiter, peer_ip);
+            let handler = make_handler(svc, auth, limiter, peer_ip, db_path_for_conn);
             if let Some(tls_acceptor) = tls_acceptor {
                 let tls_stream = match tls_acceptor.accept(stream).await {
                     Ok(s) => s,
