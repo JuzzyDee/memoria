@@ -74,6 +74,10 @@ serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+# tokio::task_local! — used to propagate the per-request auth context
+# through the rmcp dispatch chain. wasm32-friendly subset (no rt-multi-thread,
+# no IO drivers).
+tokio = { version = "1", default-features = false, features = ["sync", "macros", "rt"] }
 # Wasm32-unknown-unknown has no OS, so getrandom needs a JS shim for
 # entropy. Pulls into rand + uuid transitively. The `wasm_js` feature is
 # the modern (0.3+) name; older code uses `js`.

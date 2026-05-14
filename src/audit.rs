@@ -14,7 +14,10 @@
 // audit write should not turn a legitimate request into an error.
 
 use crate::api_key::Role;
+
+#[cfg(not(target_family = "wasm"))]
 use rusqlite::params;
+#[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 
 /// One audit event. Constructed and `log()`d at the request boundary
@@ -36,11 +39,11 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    fn success(self) -> bool {
+    pub fn success(self) -> bool {
         matches!(self, Outcome::Ok)
     }
 
-    fn error_kind(self) -> Option<&'static str> {
+    pub fn error_kind(self) -> Option<&'static str> {
         match self {
             Outcome::Ok => None,
             Outcome::ScopeViolation => Some("scope_violation"),
@@ -67,6 +70,10 @@ pub const SCHEMA_SQL: &str = "
 /// Write an audit entry. Best-effort — failures are logged but never
 /// propagated to the caller. Opens its own short-lived connection so it
 /// doesn't entangle with the per-request store handles.
+///
+/// Native (rusqlite) implementation; the wasm32 worker uses
+/// `worker_audit::log` which writes to D1 instead.
+#[cfg(not(target_family = "wasm"))]
 pub fn log(db_path: &Path, entry: AuditEntry<'_>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -98,7 +105,7 @@ pub fn log(db_path: &Path, entry: AuditEntry<'_>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
     use rusqlite::Connection;

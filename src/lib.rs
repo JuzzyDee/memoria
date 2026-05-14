@@ -12,10 +12,15 @@
 #![cfg(target_family = "wasm")]
 
 // Universal types — shared with the native bins via the same source files.
+mod api_key;
+mod audit;
 mod embed;
+mod key_rate;
 mod memory;
 
 // Worker-side modules (wasm32-only).
+mod worker_audit;
+mod worker_auth_ctx;
 mod worker_embed;
 mod worker_store;
 mod worker_vectorize;
@@ -35,7 +40,39 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         "/test/list" => list_test_memories(&env).await,
         "/test/embed" => test_embed(&env, &req).await,
         "/test/recall_semantic" => test_recall_semantic(&env, &req).await,
+        "/test/auth" => test_auth(&env, &req).await,
         _ => Response::ok("memoria — Cloudflare migration in progress (CLA-84)"),
+    }
+}
+
+/// Resolve a Bearer header to the worker's auth context. Pass the raw
+/// service key as `Authorization: Bearer mk_rover_xxx`. Returns the
+/// derived AuthCtx — role + key_id — or 401 if the bearer doesn't match
+/// any configured MEMORIA_API_KEYS entry. OAuth-style bearers (Phase 5b)
+/// will resolve here too once that lands.
+async fn test_auth(env: &Env, req: &Request) -> Result<Response> {
+    let bearer = req
+        .headers()
+        .get("authorization")?
+        .and_then(|h| h.strip_prefix("Bearer ").map(|s| s.to_string()));
+
+    let Some(bearer) = bearer else {
+        return Response::error("Missing Authorization: Bearer <key>", 401);
+    };
+
+    match worker_auth_ctx::validate_bearer(env, &bearer) {
+        Some(worker_auth_ctx::AuthCtx::ApiKey { role, key_id }) => Response::from_json(
+            &serde_json::json!({
+                "auth": "api_key",
+                "role": role.as_str(),
+                "key_id": key_id,
+                "recorded_by": role.as_str(),
+            }),
+        ),
+        Some(worker_auth_ctx::AuthCtx::OAuth) => Response::from_json(&serde_json::json!({
+            "auth": "oauth",
+        })),
+        None => Response::error("Invalid or unknown bearer token", 401),
     }
 }
 
