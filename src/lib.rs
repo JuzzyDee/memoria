@@ -22,6 +22,7 @@ mod worker_audit;
 mod worker_auth_ctx;
 mod worker_embed;
 mod worker_mcp;
+mod worker_mmr;
 mod worker_oauth;
 mod worker_store;
 mod worker_vectorize;

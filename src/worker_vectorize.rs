@@ -68,10 +68,26 @@ pub struct VectorMatch {
     pub score: f64,
 }
 
+/// One hit from a `query()` call made with `returnValues: true`. Used by
+/// the MMR reranking path, which needs each candidate's vector to
+/// compute pairwise candidate-candidate similarity for the diversity term.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorMatchWithVector {
+    pub id: String,
+    pub score: f64,
+    pub values: Vec<f64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct QueryResponse {
     #[serde(default)]
     matches: Vec<VectorMatch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct QueryResponseWithVectors {
+    #[serde(default)]
+    matches: Vec<VectorMatchWithVector>,
 }
 
 fn from_env(env: &Env, binding_name: &str) -> Result<VectorizeIndex> {
@@ -130,6 +146,32 @@ pub async fn query_top_k(env: &Env, vector: &[f64], top_k: u32) -> Result<Vec<Ve
     let result = JsFuture::from(promise).await.map_err(js_err)?;
 
     let response: QueryResponse = serde_wasm_bindgen::from_value(result)
+        .map_err(|e| Error::JsError(format!("Vectorize response parse failed: {}", e)))?;
+    Ok(response.matches)
+}
+
+/// Top-k similarity search that also returns each match's embedding
+/// vector (Vectorize's `returnValues: true` option). Used by the MMR
+/// reranker, which needs candidate vectors to compute pairwise
+/// candidate-candidate similarity for the diversity term.
+pub async fn query_top_k_with_vectors(
+    env: &Env,
+    vector: &[f64],
+    top_k: u32,
+) -> Result<Vec<VectorMatchWithVector>> {
+    let index = from_env(env, "VECTORS")?;
+
+    let vector_arr: Array = vector.iter().copied().map(JsValue::from_f64).collect();
+    let options = Object::new();
+    Reflect::set(&options, &"topK".into(), &(top_k as f64).into()).map_err(js_err)?;
+    Reflect::set(&options, &"returnValues".into(), &JsValue::TRUE).map_err(js_err)?;
+
+    let promise = index
+        .query(vector_arr.into(), options.into())
+        .map_err(js_err)?;
+    let result = JsFuture::from(promise).await.map_err(js_err)?;
+
+    let response: QueryResponseWithVectors = serde_wasm_bindgen::from_value(result)
         .map_err(|e| Error::JsError(format!("Vectorize response parse failed: {}", e)))?;
     Ok(response.matches)
 }

@@ -469,24 +469,38 @@ async fn tool_recall(
         .await
         .map_err(|e| format!("get_orientation: {:?}", e))?;
 
-    // Semantic recall: embed query → Vectorize top-k → D1 lookup.
+    // Semantic recall: embed → Vectorize oversample (with vectors) →
+    // MMR rerank → D1 lookup. The oversample-and-MMR step exists to
+    // dilute the semantic-and-its-source-episodics pattern: when a
+    // semantic memory is consolidated from episodics they live near each
+    // other in embedding space, and naive top-K returns all three for
+    // what is structurally one piece of knowledge. λ=0.7 keeps the
+    // selector relevance-weighted while pushing back on duplicates.
     let query_emb = worker_embed::embed_query(env, &args.context)
         .await
         .map_err(|e| format!("embed_query: {:?}", e))?;
-    let matches = worker_vectorize::query_top_k(env, &query_emb, limit as u32)
+    let oversample = ((limit * 4).clamp(10, 100)) as u32;
+    let matches = worker_vectorize::query_top_k_with_vectors(env, &query_emb, oversample)
         .await
         .map_err(|e| format!("vectorize query: {:?}", e))?;
-    let ids: Vec<&str> = matches.iter().map(|m| m.id.as_str()).collect();
+    let reranked_ids = crate::worker_mmr::mmr_rerank(&query_emb, &matches, limit, 0.7);
+    let ids: Vec<&str> = reranked_ids.iter().map(String::as_str).collect();
     let mut active = worker_store::get_many(db, &ids)
         .await
         .map_err(|e| format!("get_many: {:?}", e))?;
 
-    // Re-order `active` by the score order from Vectorize (get_many doesn't
-    // preserve order), and drop any orientation memories that snuck in
-    // (Vectorize indexes everything; orientation is surfaced separately).
+    // Re-order `active` by MMR selection order (get_many doesn't preserve
+    // order), and drop any orientation memories that snuck in (Vectorize
+    // indexes everything; orientation is surfaced separately).
     active.sort_by(|a, b| {
-        let ai = matches.iter().position(|m| m.id == a.id).unwrap_or(usize::MAX);
-        let bi = matches.iter().position(|m| m.id == b.id).unwrap_or(usize::MAX);
+        let ai = reranked_ids
+            .iter()
+            .position(|id| id == &a.id)
+            .unwrap_or(usize::MAX);
+        let bi = reranked_ids
+            .iter()
+            .position(|id| id == &b.id)
+            .unwrap_or(usize::MAX);
         ai.cmp(&bi)
     });
     active.retain(|m| m.memory_type != MemoryType::Orientation);
@@ -734,24 +748,27 @@ async fn tool_recall_check(
     let query_emb = worker_embed::embed_query(env, &args.topic)
         .await
         .map_err(|e| format!("embed_query: {:?}", e))?;
-    // Pull extra so the score-filter doesn't starve the result set.
-    let matches = worker_vectorize::query_top_k(env, &query_emb, (limit * 2) as u32)
+    // Oversample wide enough to absorb both the min_similarity cull AND
+    // give MMR meaningful diversity headroom. Threshold-filter first so
+    // we don't burn MMR slots diversifying low-relevance matches.
+    let oversample = ((limit * 4).clamp(10, 100)) as u32;
+    let matches = worker_vectorize::query_top_k_with_vectors(env, &query_emb, oversample)
         .await
         .map_err(|e| format!("vectorize query: {:?}", e))?;
-    let relevant: Vec<&worker_vectorize::VectorMatch> = matches
-        .iter()
+    let above_threshold: Vec<worker_vectorize::VectorMatchWithVector> = matches
+        .into_iter()
         .filter(|m| m.score >= min_similarity)
-        .take(limit)
         .collect();
 
-    if relevant.is_empty() {
+    if above_threshold.is_empty() {
         return Ok(format!(
             "No memories found for topic: \"{}\" (threshold: {:.2})",
             args.topic, min_similarity
         ));
     }
 
-    let ids: Vec<&str> = relevant.iter().map(|m| m.id.as_str()).collect();
+    let reranked_ids = crate::worker_mmr::mmr_rerank(&query_emb, &above_threshold, limit, 0.7);
+    let ids: Vec<&str> = reranked_ids.iter().map(String::as_str).collect();
     let memories = worker_store::get_many(db, &ids)
         .await
         .map_err(|e| format!("get_many: {:?}", e))?;
@@ -768,26 +785,23 @@ async fn tool_recall_check(
         ep, sem, ori, args.topic, min_similarity
     );
 
-    // Re-order memories to match the Vectorize score order.
-    let mut ordered: Vec<(&Memory, f64)> = relevant
+    // Display in MMR selection order, keeping each memory's raw similarity
+    // score for the reader (the order is MMR, the per-row sim is cosine).
+    let id_to_score: std::collections::HashMap<&str, f64> = above_threshold
         .iter()
-        .filter_map(|vm| {
-            memories
-                .iter()
-                .find(|m| m.id == vm.id)
-                .map(|m| (m, vm.score))
-        })
+        .map(|m| (m.id.as_str(), m.score))
         .collect();
-    ordered.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    for (m, sim) in &ordered {
-        out.push_str(&format!(
-            "[sim:{:.2} | str:{:.2} | {}]\n{}\n",
-            sim,
-            m.strength,
-            &m.id[..8],
-            m.summary
-        ));
+    for id in &reranked_ids {
+        if let Some(m) = memories.iter().find(|m| &m.id == id) {
+            let sim = id_to_score.get(m.id.as_str()).copied().unwrap_or(0.0);
+            out.push_str(&format!(
+                "[sim:{:.2} | str:{:.2} | {}]\n{}\n",
+                sim,
+                m.strength,
+                &m.id[..8],
+                m.summary
+            ));
+        }
     }
     Ok(out)
 }
