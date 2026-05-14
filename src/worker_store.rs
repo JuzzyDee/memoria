@@ -254,10 +254,18 @@ pub async fn insert_memory_verbatim(db: &D1Database, m: &Memory) -> Result<()> {
     // type-coercion failures — those need to be surfaced explicitly or
     // they show up as "200 OK from /admin/import but no rows in D1."
     if !result.success() {
+        let err = result
+            .error()
+            .unwrap_or_else(|| "no error message".to_string());
+        // Idempotency for the migration use case: a duplicate id means
+        // we already migrated this memory. Treat as success so re-runs
+        // are safe. Every other failure mode still surfaces as 500.
+        if err.contains("UNIQUE constraint failed") {
+            return Ok(());
+        }
         return Err(worker::Error::RustError(format!(
             "D1 INSERT did not succeed for memory {}: {}",
-            m.id,
-            result.error().unwrap_or_else(|| "no error message".to_string())
+            m.id, err
         )));
     }
     Ok(())
