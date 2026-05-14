@@ -40,7 +40,7 @@ command = "cargo install -q worker-build && worker-build --release"
 binding = "DB"
 database_name = "memoria-db"
 # Run `wrangler d1 create memoria-db` and paste the returned UUID here.
-database_id = "PLACEHOLDER-RUN-WRANGLER-D1-CREATE"
+database_id = "7f624c8c-06e9-4417-ab0c-03944bfcb8b3"
 
 # ──────────────────────────────────────────────────────────────────────
 # Vectorize — vector index for semantic recall. Replaces the in-DB f32
@@ -68,7 +68,7 @@ binding = "AI"
 [[kv_namespaces]]
 binding = "TOKENS"
 # Run `wrangler kv namespace create MEMORIA_TOKENS` and paste id here.
-id = "PLACEHOLDER-RUN-WRANGLER-KV-CREATE"
+id = "9458dc8b95fa40b0b7f1e162abb4f8b1"
 
 # ──────────────────────────────────────────────────────────────────────
 # Durable Object — short-lived OAuth authorization codes (5-minute TTL).
