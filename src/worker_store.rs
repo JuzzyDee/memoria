@@ -210,43 +210,56 @@ pub async fn recall_active(
 /// requires careful thought; the endpoint should stay admin-only.
 pub async fn insert_memory_verbatim(db: &D1Database, m: &Memory) -> Result<()> {
     let tags_json = serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".to_string());
-    db.prepare(
-        "INSERT INTO memories
+    let result = db
+        .prepare(
+            "INSERT INTO memories
             (id, memory_type, content, summary, created_at, last_accessed,
              access_count, strength, stability, entity, tags, image_hash,
              image_mime, recorded_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&[
-        m.id.clone().into(),
-        m.memory_type.as_str().into(),
-        m.content.clone().into(),
-        m.summary.clone().into(),
-        m.created_at.to_rfc3339().into(),
-        m.last_accessed.to_rfc3339().into(),
-        (m.access_count as i32).into(),
-        m.strength.into(),
-        m.stability.into(),
-        match &m.entity {
-            Some(e) => e.clone().into(),
-            None => worker::wasm_bindgen::JsValue::NULL,
-        },
-        tags_json.into(),
-        match &m.image_hash {
-            Some(h) => h.clone().into(),
-            None => worker::wasm_bindgen::JsValue::NULL,
-        },
-        match &m.image_mime {
-            Some(t) => t.clone().into(),
-            None => worker::wasm_bindgen::JsValue::NULL,
-        },
-        match &m.recorded_by {
-            Some(r) => r.clone().into(),
-            None => worker::wasm_bindgen::JsValue::NULL,
-        },
-    ])?
-    .run()
-    .await?;
+        )
+        .bind(&[
+            m.id.clone().into(),
+            m.memory_type.as_str().into(),
+            m.content.clone().into(),
+            m.summary.clone().into(),
+            m.created_at.to_rfc3339().into(),
+            m.last_accessed.to_rfc3339().into(),
+            (m.access_count as i32).into(),
+            m.strength.into(),
+            m.stability.into(),
+            match &m.entity {
+                Some(e) => e.clone().into(),
+                None => worker::wasm_bindgen::JsValue::NULL,
+            },
+            tags_json.into(),
+            match &m.image_hash {
+                Some(h) => h.clone().into(),
+                None => worker::wasm_bindgen::JsValue::NULL,
+            },
+            match &m.image_mime {
+                Some(t) => t.clone().into(),
+                None => worker::wasm_bindgen::JsValue::NULL,
+            },
+            match &m.recorded_by {
+                Some(r) => r.clone().into(),
+                None => worker::wasm_bindgen::JsValue::NULL,
+            },
+        ])?
+        .run()
+        .await?;
+
+    // workers-rs's `run()` returns Ok as long as the JS Promise resolves.
+    // D1 can resolve a Promise with `{success: false}` for constraint /
+    // type-coercion failures — those need to be surfaced explicitly or
+    // they show up as "200 OK from /admin/import but no rows in D1."
+    if !result.success() {
+        return Err(worker::Error::RustError(format!(
+            "D1 INSERT did not succeed for memory {}: {}",
+            m.id,
+            result.error().unwrap_or_else(|| "no error message".to_string())
+        )));
+    }
     Ok(())
 }
 
