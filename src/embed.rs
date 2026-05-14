@@ -1,27 +1,32 @@
-// embed.rs — Embedding generation via Ollama
+// embed.rs — Embedding generation (native: Ollama) + universal vector math.
 //
-// Uses nomic-embed-text running locally via Ollama to generate 768-dimension
-// embeddings for semantic similarity search. The "search_document:" and
-// "search_query:" prefixes are part of nomic's training — they improve
-// retrieval quality by signalling intent.
+// On native, calls Ollama running locally with nomic-embed-text — this path
+// is still used by the local-mode MCP server (src/main.rs) and the
+// consolidator (src/rem.rs) during the migration. On the Cloudflare
+// Worker, embeddings come from Workers AI via worker_embed.rs.
 //
-// This module handles the HTTP call to Ollama and cosine similarity math.
-// The store handles persistence. The MCP server handles orchestration.
+// The universal items below (Embedding type, cosine_similarity,
+// embedding_to_bytes / embedding_from_bytes) compile on both targets and
+// are shared by both implementations.
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(target_family = "wasm"))]
 const OLLAMA_URL: &str = "http://127.0.0.1:11434/api/embeddings";
+#[cfg(not(target_family = "wasm"))]
 const MODEL: &str = "nomic-embed-text";
 
 /// An embedding vector.
 pub type Embedding = Vec<f64>;
 
+#[cfg(not(target_family = "wasm"))]
 #[derive(Serialize)]
 struct OllamaRequest<'a> {
     model: &'a str,
     prompt: &'a str,
 }
 
+#[cfg(not(target_family = "wasm"))]
 #[derive(Deserialize)]
 struct OllamaResponse {
     embedding: Vec<f64>,
@@ -29,6 +34,7 @@ struct OllamaResponse {
 
 /// Generate an embedding for memory content (stored document).
 /// Prefixes with "search_document:" per nomic's training protocol.
+#[cfg(not(target_family = "wasm"))]
 pub fn embed_document(text: &str) -> Result<Embedding, String> {
     let prompt = format!("search_document: {}", text);
     call_ollama(&prompt)
@@ -36,12 +42,14 @@ pub fn embed_document(text: &str) -> Result<Embedding, String> {
 
 /// Generate an embedding for a recall query (search context).
 /// Prefixes with "search_query:" per nomic's training protocol.
+#[cfg(not(target_family = "wasm"))]
 pub fn embed_query(text: &str) -> Result<Embedding, String> {
     let prompt = format!("search_query: {}", text);
     call_ollama(&prompt)
 }
 
 /// Call Ollama's embedding API synchronously.
+#[cfg(not(target_family = "wasm"))]
 fn call_ollama(prompt: &str) -> Result<Embedding, String> {
     let request = OllamaRequest {
         model: MODEL,
