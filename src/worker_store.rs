@@ -210,13 +210,19 @@ pub async fn recall_active(
 /// requires careful thought; the endpoint should stay admin-only.
 pub async fn insert_memory_verbatim(db: &D1Database, m: &Memory) -> Result<()> {
     let tags_json = serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".to_string());
+    // `ON CONFLICT(id) DO NOTHING` makes the migration idempotent at the
+    // SQL level — re-runs silently skip already-imported rows without
+    // surfacing PK conflicts as errors. Other constraint violations
+    // (NOT NULL, datatype mismatch, etc.) still fail normally and
+    // surface via the success() check below.
     let result = db
         .prepare(
             "INSERT INTO memories
             (id, memory_type, content, summary, created_at, last_accessed,
              access_count, strength, stability, entity, tags, image_hash,
              image_mime, recorded_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO NOTHING",
         )
         .bind(&[
             m.id.clone().into(),
@@ -253,19 +259,13 @@ pub async fn insert_memory_verbatim(db: &D1Database, m: &Memory) -> Result<()> {
     // D1 can resolve a Promise with `{success: false}` for constraint /
     // type-coercion failures — those need to be surfaced explicitly or
     // they show up as "200 OK from /admin/import but no rows in D1."
+    // PK conflicts no longer reach this check (handled at SQL level via
+    // ON CONFLICT DO NOTHING), so this is now purely for *other* failures.
     if !result.success() {
-        let err = result
-            .error()
-            .unwrap_or_else(|| "no error message".to_string());
-        // Idempotency for the migration use case: a duplicate id means
-        // we already migrated this memory. Treat as success so re-runs
-        // are safe. Every other failure mode still surfaces as 500.
-        if err.contains("UNIQUE constraint failed") {
-            return Ok(());
-        }
         return Err(worker::Error::RustError(format!(
             "D1 INSERT did not succeed for memory {}: {}",
-            m.id, err
+            m.id,
+            result.error().unwrap_or_else(|| "no error message".to_string())
         )));
     }
     Ok(())
