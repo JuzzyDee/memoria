@@ -16,6 +16,7 @@
 // 4. Eidetic memory is failure — forgetting is the feature
 // 5. The reflection is the identity
 
+mod api_key;
 mod auth;
 mod embed;
 mod store;
@@ -879,6 +880,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
+    let args: Vec<String> = std::env::args().collect();
+
+    // Subcommands. Handle these before any server / DB initialisation —
+    // keygen is a pure compute path that doesn't need a runtime store.
+    if let Some(cmd) = args.get(1).map(|s| s.as_str()) {
+        if cmd == "keygen" {
+            return run_keygen(&args[2..]);
+        }
+    }
+
     // Default database path — can be overridden with MEMORIA_DB env var
     let db_path = std::env::var("MEMORIA_DB")
         .map(PathBuf::from)
@@ -893,8 +904,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent).ok();
     }
 
-    // Check for --port flag to run as HTTP server instead of stdio
-    let args: Vec<String> = std::env::args().collect();
+    // Check for --port flag to run as HTTP server instead of stdio.
+    // `args` was collected above (before the subcommand dispatch).
     let port = args
         .iter()
         .position(|a| a == "--port")
@@ -925,6 +936,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!("Memoria shutting down.");
+    Ok(())
+}
+
+/// `memoria keygen --role <role>` — generate a service API key for a role.
+///
+/// Prints the raw key + hash entry + key_id to stderr ONCE; memoria does
+/// not retain the raw key. The caller copies the raw key into the client's
+/// `.env` (e.g. rover's `MEMORIA_MCP_TOKEN`), and the hash entry into
+/// memoria's `MEMORIA_API_KEYS` (comma-separated list).
+fn run_keygen(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut role: Option<api_key::Role> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--role" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or("--role requires a value (e.g. --role rover)")?;
+                role = Some(api_key::Role::from_str(value).ok_or_else(|| {
+                    format!(
+                        "unknown role: {}. Known roles: rover",
+                        value
+                    )
+                })?);
+                i += 2;
+            }
+            "--help" | "-h" => {
+                eprintln!("Usage: memoria keygen --role <role>");
+                eprintln!();
+                eprintln!("Roles: rover");
+                return Ok(());
+            }
+            other => {
+                return Err(format!(
+                    "unknown argument: {}. Try `memoria keygen --help`",
+                    other
+                )
+                .into());
+            }
+        }
+    }
+
+    let role = role.ok_or("--role is required (e.g. --role rover)")?;
+    let key = api_key::generate_api_key(role)?;
+    api_key::print_generated_key(&key);
     Ok(())
 }
 
