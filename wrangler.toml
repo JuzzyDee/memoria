@@ -74,14 +74,19 @@ id = "9458dc8b95fa40b0b7f1e162abb4f8b1"
 # Durable Object — short-lived OAuth authorization codes (5-minute TTL).
 # DO gives strong consistency for the auth-code state, which short-TTL KV
 # is theoretically too eventually-consistent for.
+#
+# Commented out for the Phase 2a stub deploy — wrangler refuses to deploy
+# a Worker that declares a DO class but doesn't export one from the
+# entrypoint. Uncomment in CLA-84 phase 5 (auth migration), when the
+# AuthCodesObject impl actually lands in src/lib.rs.
 # ──────────────────────────────────────────────────────────────────────
-[[durable_objects.bindings]]
-name = "AUTH_CODES"
-class_name = "AuthCodesObject"
-
-[[migrations]]
-tag = "v1"
-new_classes = ["AuthCodesObject"]
+# [[durable_objects.bindings]]
+# name = "AUTH_CODES"
+# class_name = "AuthCodesObject"
+#
+# [[migrations]]
+# tag = "v1"
+# new_classes = ["AuthCodesObject"]
 
 # ──────────────────────────────────────────────────────────────────────
 # Secrets (set via `wrangler secret put`, not committed):
