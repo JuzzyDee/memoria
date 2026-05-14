@@ -1,0 +1,90 @@
+# wrangler.toml — Cloudflare Workers configuration for memoria (CLA-84).
+#
+# This file declares the bindings memoria needs as a Cloudflare Worker:
+# D1 for memory storage, Vectorize for semantic recall, Workers AI for
+# embeddings, KV for OAuth tokens, and a Durable Object for short-lived
+# OAuth authorization codes.
+#
+# Phase 1 of the migration only declares intent — the IDs below are
+# placeholders. Before `wrangler deploy` actually works, you need to:
+#
+#   1. wrangler login
+#   2. wrangler d1 create memoria-db
+#        → paste the returned database_id below
+#   3. wrangler vectorize create memoria-vectors \
+#        --dimensions=768 --metric=cosine
+#   4. wrangler kv namespace create MEMORIA_TOKENS
+#        → paste the returned id below
+#   5. Apply the initial migration:
+#        wrangler d1 migrations apply memoria-db
+#
+# The [build] command kicks in once the workspace has been restructured
+# for wasm32 (CLA-84 phase 7). Until then, `wrangler dev` won't compile.
+
+name = "memoria"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-05-01"
+# Tail-Worker observability — wire up later when there's a tail-Worker handler.
+# tail_consumers = []
+
+[build]
+# Rust workers compile to wasm32 via worker-build (installs on demand).
+# Requires the `wasm32-unknown-unknown` target installed via rustup.
+command = "cargo install -q worker-build && worker-build --release"
+
+# ──────────────────────────────────────────────────────────────────────
+# D1 — primary memory store. Replaces the local SQLite file.
+# Schema lives in `migrations/`.
+# ──────────────────────────────────────────────────────────────────────
+[[d1_databases]]
+binding = "DB"
+database_name = "memoria-db"
+# Run `wrangler d1 create memoria-db` and paste the returned UUID here.
+database_id = "PLACEHOLDER-RUN-WRANGLER-D1-CREATE"
+
+# ──────────────────────────────────────────────────────────────────────
+# Vectorize — vector index for semantic recall. Replaces the in-DB f32
+# blob column + linear cosine scan from the local SQLite path.
+# bge-base-en-v1.5 produces 768-dim vectors. Cosine similarity matches
+# what the existing embed::cosine_similarity computes.
+# ──────────────────────────────────────────────────────────────────────
+[[vectorize]]
+binding = "VECTORS"
+index_name = "memoria-vectors"
+
+# ──────────────────────────────────────────────────────────────────────
+# Workers AI — bge-base-en-v1.5 embeddings. Replaces the local Ollama
+# nomic-embed-text. One-time re-embed of ~450 existing memories happens
+# during data migration (phase 8).
+# ──────────────────────────────────────────────────────────────────────
+[ai]
+binding = "AI"
+
+# ──────────────────────────────────────────────────────────────────────
+# KV — OAuth access tokens. Replaces the in-memory Arc<RwLock<Vec>>
+# token cache that gets wiped on every server restart. Tokens have TTL
+# (7d matches current OAuth design); KV's TTL support fits naturally.
+# ──────────────────────────────────────────────────────────────────────
+[[kv_namespaces]]
+binding = "TOKENS"
+# Run `wrangler kv namespace create MEMORIA_TOKENS` and paste id here.
+id = "PLACEHOLDER-RUN-WRANGLER-KV-CREATE"
+
+# ──────────────────────────────────────────────────────────────────────
+# Durable Object — short-lived OAuth authorization codes (5-minute TTL).
+# DO gives strong consistency for the auth-code state, which short-TTL KV
+# is theoretically too eventually-consistent for.
+# ──────────────────────────────────────────────────────────────────────
+[[durable_objects.bindings]]
+name = "AUTH_CODES"
+class_name = "AuthCodesObject"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["AuthCodesObject"]
+
+# ──────────────────────────────────────────────────────────────────────
+# Secrets (set via `wrangler secret put`, not committed):
+#   MEMORIA_API_KEYS   — semicolon-separated rover:<argon2-hash> entries
+#                        (CLA-86 service-key list)
+# ──────────────────────────────────────────────────────────────────────

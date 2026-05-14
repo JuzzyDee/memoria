@@ -5,3 +5,9 @@
 *.db-shm
 rem.log
 .claude/
+
+# Cloudflare Workers (CLA-84)
+.dev.vars
+.wrangler/
+build/
+node_modules/
