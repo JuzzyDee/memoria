@@ -1,0 +1,148 @@
+// auth_ctx.rs — Per-request auth context, propagated via tokio task-local.
+//
+// rmcp's tool dispatch sits downstream of the HTTP bearer check. To enforce
+// per-role scope gating inside tool handlers, we set a task-local at the
+// HTTP boundary right before handing the request to `mcp_svc.handle`, then
+// read it inside each handler via `check_scope`.
+//
+// task-locals propagate through async/await transparently, so any code
+// reached from `AUTH_CTX.scope(ctx, fut).await` sees the same context
+// regardless of how deep the future tree is.
+//
+// The HTTP boundary path always sets AUTH_CTX. The stdio path (local mode
+// for Claude Code Desktop) does not — when AUTH_CTX is unset, `check_scope`
+// defaults to allowing, which matches the historical "local stdio = full
+// trust" stance.
+
+use crate::api_key::Role;
+
+/// Per-request authentication context. Set at the HTTP bearer-check
+/// boundary, read by tool handlers via [`check_scope`].
+#[derive(Debug, Clone)]
+pub enum AuthCtx {
+    /// Authenticated via OAuth bearer — user-facing client (Claude Code /
+    /// Web / iOS). Full tool access.
+    OAuth,
+    /// Authenticated via service API key. Role determines which tools the
+    /// caller may invoke; `key_id` flows to the audit trail (phase 6).
+    ApiKey { role: Role, key_id: String },
+}
+
+tokio::task_local! {
+    /// The auth context for the currently-handled MCP request.
+    ///
+    /// Always set on the HTTP path. Unset on the stdio path (local mode)
+    /// and during tests — `check_scope` treats `unset == allow` for those
+    /// cases, which preserves existing local-mode behaviour.
+    pub static AUTH_CTX: AuthCtx;
+}
+
+/// Check whether the current auth context is permitted to invoke `tool`.
+///
+/// Returns:
+/// - `Ok(())` when OAuth-authenticated (full access)
+/// - `Ok(())` when API-key role's allowlist permits the tool
+/// - `Ok(())` when AUTH_CTX is unset (stdio / test path — local trust)
+/// - `Err(message)` when an API-key role does NOT permit the tool. The
+///   error string is suitable for returning directly from a tool handler.
+///
+/// Scope denials also emit a `tracing::warn!` capturing role, key_id, and
+/// tool — phase 6 will additionally write an audit row.
+pub fn check_scope(tool: &str) -> Result<(), String> {
+    AUTH_CTX
+        .try_with(|ctx| match ctx {
+            AuthCtx::OAuth => Ok(()),
+            AuthCtx::ApiKey { role, key_id } => {
+                if role.allows(tool) {
+                    Ok(())
+                } else {
+                    tracing::warn!(
+                        "Scope violation: role={} key_id={} attempted to call `{}`",
+                        role.as_str(),
+                        key_id,
+                        tool,
+                    );
+                    Err(format!(
+                        "Forbidden: role `{}` is not permitted to call `{}`",
+                        role.as_str(),
+                        tool,
+                    ))
+                }
+            }
+        })
+        // AUTH_CTX is only set on the HTTP path. stdio mode (Claude Code
+        // Desktop local) and unit tests don't set it — treat as full trust.
+        .unwrap_or(Ok(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // task-local access requires running inside a tokio runtime; use #[tokio::test].
+
+    #[tokio::test]
+    async fn unset_context_allows_everything() {
+        // No AUTH_CTX.scope wrapping — should be permissive (stdio / test path).
+        assert!(check_scope("recall").is_ok());
+        assert!(check_scope("reframe").is_ok());
+        assert!(check_scope("forget").is_ok());
+        assert!(check_scope("anything_at_all").is_ok());
+    }
+
+    #[tokio::test]
+    async fn oauth_context_allows_everything() {
+        AUTH_CTX
+            .scope(AuthCtx::OAuth, async {
+                assert!(check_scope("recall").is_ok());
+                assert!(check_scope("reframe").is_ok());
+                assert!(check_scope("forget").is_ok());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn rover_can_read_and_write_but_not_revise() {
+        let ctx = AuthCtx::ApiKey {
+            role: Role::Rover,
+            key_id: "deadbeef".to_string(),
+        };
+        AUTH_CTX
+            .scope(ctx, async {
+                // Allowed
+                assert!(check_scope("recall").is_ok());
+                assert!(check_scope("recall_check").is_ok());
+                assert!(check_scope("recall_specific").is_ok());
+                assert!(check_scope("recall_image").is_ok());
+                assert!(check_scope("review").is_ok());
+                assert!(check_scope("remember").is_ok());
+                assert!(check_scope("remember_with_image").is_ok());
+
+                // Forbidden — these are the consolidator's job, not the rover's
+                assert!(check_scope("reframe").is_err());
+                assert!(check_scope("forget").is_err());
+                assert!(check_scope("reflect").is_err());
+
+                // Unknown tools default to forbidden (matches!(tool, "...") returns false)
+                assert!(check_scope("admin_dump_all").is_err());
+                assert!(check_scope("").is_err());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn denial_message_names_role_and_tool() {
+        let ctx = AuthCtx::ApiKey {
+            role: Role::Rover,
+            key_id: "deadbeef".to_string(),
+        };
+        AUTH_CTX
+            .scope(ctx, async {
+                let err = check_scope("reframe").unwrap_err();
+                assert!(err.contains("rover"));
+                assert!(err.contains("reframe"));
+                assert!(err.to_lowercase().contains("forbidden"));
+            })
+            .await;
+    }
+}

@@ -46,6 +46,32 @@ impl Role {
             _ => None,
         }
     }
+
+    /// Whether this role is permitted to invoke a given MCP tool.
+    ///
+    /// Hardcoded per-role allowlist — adding a tool to a role is a deliberate
+    /// code change. Even if the rover's key leaks, the attacker cannot
+    /// reframe, forget, or reflect — the worst they can do is read existing
+    /// memories and add new ones (which the audit trail captures).
+    ///
+    /// The `rover` allowlist (CLA-86 §3):
+    ///   reads:  recall, recall_check, recall_specific, recall_image, review
+    ///   writes: remember, remember_with_image  (entity forced server-side
+    ///                                           to "rover" in phase 4)
+    pub fn allows(&self, tool: &str) -> bool {
+        match self {
+            Role::Rover => matches!(
+                tool,
+                "recall"
+                    | "recall_check"
+                    | "recall_specific"
+                    | "recall_image"
+                    | "review"
+                    | "remember"
+                    | "remember_with_image"
+            ),
+        }
+    }
 }
 
 /// A freshly minted API key. The raw key exists only at generation time and

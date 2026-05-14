@@ -18,6 +18,7 @@
 
 mod api_key;
 mod auth;
+mod auth_ctx;
 mod embed;
 mod store;
 
@@ -246,6 +247,10 @@ impl MemoriaServer {
         )
     )]
     fn recall(&self, Parameters(params): Parameters<RecallParams>) -> String {
+        if let Err(msg) = auth_ctx::check_scope("recall") {
+            return msg;
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return e,
@@ -342,6 +347,10 @@ impl MemoriaServer {
         )
     )]
     fn recall_check(&self, Parameters(params): Parameters<RecallCheckParams>) -> String {
+        if let Err(msg) = auth_ctx::check_scope("recall_check") {
+            return msg;
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return e,
@@ -412,6 +421,10 @@ impl MemoriaServer {
         )
     )]
     fn recall_specific(&self, Parameters(params): Parameters<RecallSpecificParams>) -> String {
+        if let Err(msg) = auth_ctx::check_scope("recall_specific") {
+            return msg;
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return e,
@@ -477,6 +490,10 @@ impl MemoriaServer {
         &self,
         Parameters(params): Parameters<RecallImageParams>,
     ) -> MultiContent {
+        if let Err(msg) = auth_ctx::check_scope("recall_image") {
+            return MultiContent(vec![Content::text(msg)]);
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return MultiContent(vec![Content::text(e)]),
@@ -546,6 +563,10 @@ impl MemoriaServer {
         &self,
         Parameters(params): Parameters<RememberWithImageParams>,
     ) -> String {
+        if let Err(msg) = auth_ctx::check_scope("remember_with_image") {
+            return msg;
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return e,
@@ -598,6 +619,10 @@ impl MemoriaServer {
         )
     )]
     fn review(&self, Parameters(params): Parameters<ReviewParams>) -> String {
+        if let Err(msg) = auth_ctx::check_scope("review") {
+            return msg;
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return e,
@@ -646,6 +671,10 @@ impl MemoriaServer {
         )
     )]
     fn remember(&self, Parameters(params): Parameters<RememberParams>) -> String {
+        if let Err(msg) = auth_ctx::check_scope("remember") {
+            return msg;
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return e,
@@ -718,6 +747,10 @@ impl MemoriaServer {
         )
     )]
     fn reframe(&self, Parameters(params): Parameters<ReframeParams>) -> String {
+        if let Err(msg) = auth_ctx::check_scope("reframe") {
+            return msg;
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return e,
@@ -741,6 +774,10 @@ impl MemoriaServer {
         )
     )]
     fn forget(&self, Parameters(params): Parameters<ForgetParams>) -> String {
+        if let Err(msg) = auth_ctx::check_scope("forget") {
+            return msg;
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return e,
@@ -776,6 +813,10 @@ impl MemoriaServer {
         )
     )]
     fn reflect(&self, Parameters(params): Parameters<ReflectParams>) -> String {
+        if let Err(msg) = auth_ctx::check_scope("reflect") {
+            return msg;
+        }
+
         let store = match self.open_store() {
             Ok(s) => s,
             Err(e) => return e,
@@ -1310,31 +1351,38 @@ async fn serve_http(
                         if let Some(token) = auth_header.strip_prefix("Bearer ") {
                             match auth.validate_bearer(token) {
                                 auth::Outcome::OAuth => {
-                                    // Existing behaviour — full access for OAuth bearers.
-                                    let resp = mcp_svc.handle(req).await;
+                                    // Full access via OAuth. AUTH_CTX is set so tool
+                                    // handlers' check_scope() sees OAuth and allows
+                                    // everything (matches the historical behaviour).
+                                    let ctx = auth_ctx::AuthCtx::OAuth;
+                                    let resp = auth_ctx::AUTH_CTX
+                                        .scope(ctx, mcp_svc.handle(req))
+                                        .await;
                                     let (parts, body) = resp.into_parts();
                                     let boxed = BodyExt::boxed(body);
                                     Ok(Response::from_parts(parts, boxed))
                                 }
                                 auth::Outcome::ApiKey(info) => {
-                                    // Fail-closed for now. API key auth is mechanically
-                                    // verified (CLA-86 phase 2) but per-tool scope gating
-                                    // lands in phase 3. Until then, refuse rather than
-                                    // let an authenticated service key reach the full
-                                    // tool surface.
-                                    tracing::warn!(
-                                        "API key auth accepted but blocked pending scope gates \
-                                         (CLA-86 phase 3). role={:?} key_id={}",
-                                        info.role,
+                                    // Scope-gated access via service API key. Each tool
+                                    // handler reads AUTH_CTX via check_scope() and
+                                    // returns Forbidden if the role's allowlist denies
+                                    // it. Phase 3 of CLA-86 unlocks this — phase 2's
+                                    // fail-closed 403 is gone.
+                                    tracing::info!(
+                                        "Service API key auth — role={} key_id={}",
+                                        info.role.as_str(),
                                         info.key_id,
                                     );
-                                    Ok(full_response(
-                                        StatusCode::FORBIDDEN,
-                                        "text/plain",
-                                        "API key authenticated; per-tool scope gating not yet \
-                                         implemented (CLA-86 phase 3 pending). Refusing for safety."
-                                            .into(),
-                                    ))
+                                    let ctx = auth_ctx::AuthCtx::ApiKey {
+                                        role: info.role,
+                                        key_id: info.key_id,
+                                    };
+                                    let resp = auth_ctx::AUTH_CTX
+                                        .scope(ctx, mcp_svc.handle(req))
+                                        .await;
+                                    let (parts, body) = resp.into_parts();
+                                    let boxed = BodyExt::boxed(body);
+                                    Ok(Response::from_parts(parts, boxed))
                                 }
                                 auth::Outcome::Unauthenticated => {
                                     limiter.record_failure(&peer_ip);
