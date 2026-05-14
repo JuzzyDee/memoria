@@ -22,6 +22,7 @@ mod memory;
 mod worker_audit;
 mod worker_auth_ctx;
 mod worker_embed;
+mod worker_mcp;
 mod worker_store;
 mod worker_vectorize;
 
@@ -29,20 +30,41 @@ use crate::memory::MemoryType;
 use worker::{event, Context, Env, Request, Response, Result};
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let path = req.url()?.path().to_string();
-    match path.as_str() {
-        // Smoke-test endpoints for CLA-84 phase 2b.1 — exercise the D1
-        // binding from a deployed Worker. UNAUTHENTICATED on purpose for
-        // the smoke test; phase 6 replaces these with proper MCP routing
-        // gated by the OAuth + service-key bearer check from CLA-86.
-        "/test/create" => create_test_memory(&env, &req).await,
-        "/test/list" => list_test_memories(&env).await,
-        "/test/embed" => test_embed(&env, &req).await,
-        "/test/recall_semantic" => test_recall_semantic(&env, &req).await,
-        "/test/auth" => test_auth(&env, &req).await,
+    let method = req.method();
+    match (method.clone(), path.as_str()) {
+        // Real MCP endpoint — authenticated, scope-gated, audited.
+        (worker::Method::Post, "/mcp") => mcp_endpoint(&env, &mut req).await,
+        // Smoke-test endpoints from earlier phases. UNAUTHENTICATED on
+        // purpose for diagnostics; remove once /mcp covers the surface.
+        (_, "/test/create") => create_test_memory(&env, &req).await,
+        (_, "/test/list") => list_test_memories(&env).await,
+        (_, "/test/embed") => test_embed(&env, &req).await,
+        (_, "/test/recall_semantic") => test_recall_semantic(&env, &req).await,
+        (_, "/test/auth") => test_auth(&env, &req).await,
         _ => Response::ok("memoria — Cloudflare migration in progress (CLA-84)"),
     }
+}
+
+/// POST /mcp — the real MCP server endpoint. Validates Bearer, sets
+/// AUTH_CTX scope, hands off to worker_mcp::handle for JSON-RPC dispatch.
+async fn mcp_endpoint(env: &Env, req: &mut Request) -> Result<Response> {
+    // Auth — require a valid bearer.
+    let bearer = req
+        .headers()
+        .get("authorization")?
+        .and_then(|h| h.strip_prefix("Bearer ").map(|s| s.to_string()));
+
+    let Some(bearer) = bearer else {
+        return Response::error("Missing Authorization: Bearer <key>", 401);
+    };
+    let Some(auth) = worker_auth_ctx::validate_bearer(env, &bearer) else {
+        return Response::error("Invalid or unknown bearer token", 401);
+    };
+
+    let body = req.text().await?;
+    worker_mcp::handle(env, &body, auth).await
 }
 
 /// Resolve a Bearer header to the worker's auth context. Pass the raw
