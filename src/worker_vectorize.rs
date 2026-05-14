@@ -40,6 +40,10 @@ extern "C" {
     #[wasm_bindgen(method, catch)]
     fn query(this: &VectorizeIndex, vector: JsValue, options: JsValue)
         -> Result<Promise, JsValue>;
+
+    /// deleteByIds(ids: string[]) → Promise<VectorizeAsyncMutation>
+    #[wasm_bindgen(method, js_name = "deleteByIds", catch)]
+    fn delete_by_ids(this: &VectorizeIndex, ids: JsValue) -> Result<Promise, JsValue>;
 }
 
 impl EnvBinding for VectorizeIndex {
@@ -94,6 +98,20 @@ pub async fn upsert_one(env: &Env, id: &str, values: &[f64]) -> Result<()> {
     batch.push(&vector_obj);
 
     let promise = index.upsert(batch.into()).map_err(js_err)?;
+    JsFuture::from(promise).await.map_err(js_err)?;
+    Ok(())
+}
+
+/// Remove vectors by id. Used when a memory is forgotten — keeps the
+/// vector index in sync with D1 so semantic recall doesn't surface
+/// stale ids that no longer resolve.
+pub async fn delete_ids(env: &Env, ids: &[&str]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let index = from_env(env, "VECTORS")?;
+    let arr: Array = ids.iter().map(|s| JsValue::from_str(s)).collect();
+    let promise = index.delete_by_ids(arr.into()).map_err(js_err)?;
     JsFuture::from(promise).await.map_err(js_err)?;
     Ok(())
 }

@@ -231,6 +231,123 @@ fn handle_tools_list() -> Value {
                     },
                     "required": ["memory_id"]
                 }
+            },
+            {
+                "name": "recall_check",
+                "description": "Lightweight mid-conversation memory lookup. Stricter similarity \
+                                threshold than recall, no orientation prepended. Use when the \
+                                conversation shifts topic and you want a quick `do I know \
+                                anything about this' check without a full recall reload.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": { "type": "string" },
+                        "min_similarity": {
+                            "type": "number",
+                            "description": "0.0-1.0, default 0.6. Higher = more selective."
+                        },
+                        "limit": { "type": "integer", "description": "Default 5." }
+                    },
+                    "required": ["topic"]
+                }
+            },
+            {
+                "name": "recall_specific",
+                "description": "Retrieve specific memories by id list — the deliberate choice \
+                                to think about something. Returns full content (not summaries). \
+                                Strongest co-activation signal (the conscious choice to surface \
+                                these together shapes future recall).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_ids": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Full UUIDs or 8-char prefixes."
+                        }
+                    },
+                    "required": ["memory_ids"]
+                }
+            },
+            {
+                "name": "review",
+                "description": "Summary listing of memories grouped by type. Use at natural \
+                                breakpoints to scan what's stored without invoking semantic \
+                                recall.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Per-type limit (orientation, episodic, semantic). \
+                                            Default 20."
+                        }
+                    }
+                }
+            },
+            {
+                "name": "reframe",
+                "description": "Update an existing memory's content + summary. Use when your \
+                                understanding of a memory has evolved — reframing is not the \
+                                same as forgetting. Re-embeds and updates Vectorize so future \
+                                semantic recall uses the new framing.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": { "type": "string" },
+                        "new_content": { "type": "string" },
+                        "new_summary": { "type": "string" }
+                    },
+                    "required": ["memory_id", "new_content", "new_summary"]
+                }
+            },
+            {
+                "name": "forget",
+                "description": "Forget a memory — DELETE plus a tombstone. Use sparingly; this \
+                                is consolidation pruning, not casual deletion. Orientation \
+                                memories CANNOT be forgotten — identity is non-negotiable. \
+                                Returns whether a row was actually removed.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": { "type": "string" },
+                        "reason": {
+                            "type": "string",
+                            "description": "Why this memory is no longer needed."
+                        }
+                    },
+                    "required": ["memory_id"]
+                }
+            },
+            {
+                "name": "reflect",
+                "description": "Consolidation at natural breakpoints. Writes a reflection \
+                                episodic memory capturing the conversation's highlights, and \
+                                optionally batch-updates a set of memories whose framing has \
+                                evolved in the same session.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "conversation_highlights": {
+                            "type": "string",
+                            "description": "What mattered in this conversation, written first-\
+                                            person and prose-like."
+                        },
+                        "memories_to_update": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "memory_id": { "type": "string" },
+                                    "new_content": { "type": "string" },
+                                    "new_summary": { "type": "string" }
+                                },
+                                "required": ["memory_id", "new_content", "new_summary"]
+                            }
+                        }
+                    },
+                    "required": ["conversation_highlights"]
+                }
             }
         ]
     })
@@ -282,6 +399,48 @@ async fn handle_tools_call(
             let content = tool_recall_image(env, &db, call.arguments).await?;
             Ok(json!({
                 "content": content,
+                "isError": false,
+            }))
+        }
+        "recall_check" => {
+            let text = tool_recall_check(env, &db, call.arguments).await?;
+            Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            }))
+        }
+        "recall_specific" => {
+            let text = tool_recall_specific(&db, call.arguments).await?;
+            Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            }))
+        }
+        "review" => {
+            let text = tool_review(&db, call.arguments).await?;
+            Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            }))
+        }
+        "reframe" => {
+            let text = tool_reframe(env, &db, call.arguments).await?;
+            Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            }))
+        }
+        "forget" => {
+            let text = tool_forget(env, &db, call.arguments).await?;
+            Ok(json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            }))
+        }
+        "reflect" => {
+            let text = tool_reflect(env, &db, call.arguments).await?;
+            Ok(json!({
+                "content": [{ "type": "text", "text": text }],
                 "isError": false,
             }))
         }
@@ -551,6 +710,344 @@ async fn tool_recall_image(
             "mimeType": mime,
         }
     ]))
+}
+
+#[derive(Deserialize)]
+struct RecallCheckArgs {
+    topic: String,
+    #[serde(default)]
+    min_similarity: Option<f64>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn tool_recall_check(
+    env: &Env,
+    db: &D1Database,
+    args: Value,
+) -> std::result::Result<String, String> {
+    let args: RecallCheckArgs =
+        serde_json::from_value(args).map_err(|e| format!("invalid recall_check args: {}", e))?;
+    let min_similarity = args.min_similarity.unwrap_or(0.6);
+    let limit = args.limit.unwrap_or(5);
+
+    let query_emb = worker_embed::embed_query(env, &args.topic)
+        .await
+        .map_err(|e| format!("embed_query: {:?}", e))?;
+    // Pull extra so the score-filter doesn't starve the result set.
+    let matches = worker_vectorize::query_top_k(env, &query_emb, (limit * 2) as u32)
+        .await
+        .map_err(|e| format!("vectorize query: {:?}", e))?;
+    let relevant: Vec<&worker_vectorize::VectorMatch> = matches
+        .iter()
+        .filter(|m| m.score >= min_similarity)
+        .take(limit)
+        .collect();
+
+    if relevant.is_empty() {
+        return Ok(format!(
+            "No memories found for topic: \"{}\" (threshold: {:.2})",
+            args.topic, min_similarity
+        ));
+    }
+
+    let ids: Vec<&str> = relevant.iter().map(|m| m.id.as_str()).collect();
+    let memories = worker_store::get_many(db, &ids)
+        .await
+        .map_err(|e| format!("get_many: {:?}", e))?;
+
+    // Touch + co-activate — recall_check is still reinforcement.
+    for m in &memories {
+        let _ = worker_store::touch(db, &m.id).await;
+    }
+    let _ = worker_store::record_co_activation(db, &ids).await;
+
+    let (ep, sem, ori) = worker_store::count_by_type(db).await.unwrap_or((0, 0, 0));
+    let mut out = format!(
+        "═══ Memoria Check ═══\nStore: {} ep, {} sem, {} ori | Topic: \"{}\" | Threshold: {:.2}\n\n",
+        ep, sem, ori, args.topic, min_similarity
+    );
+
+    // Re-order memories to match the Vectorize score order.
+    let mut ordered: Vec<(&Memory, f64)> = relevant
+        .iter()
+        .filter_map(|vm| {
+            memories
+                .iter()
+                .find(|m| m.id == vm.id)
+                .map(|m| (m, vm.score))
+        })
+        .collect();
+    ordered.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (m, sim) in &ordered {
+        out.push_str(&format!(
+            "[sim:{:.2} | str:{:.2} | {}]\n{}\n",
+            sim,
+            m.strength,
+            &m.id[..8],
+            m.summary
+        ));
+    }
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct RecallSpecificArgs {
+    memory_ids: Vec<String>,
+}
+
+async fn tool_recall_specific(
+    db: &D1Database,
+    args: Value,
+) -> std::result::Result<String, String> {
+    let args: RecallSpecificArgs = serde_json::from_value(args)
+        .map_err(|e| format!("invalid recall_specific args: {}", e))?;
+
+    let mut memories: Vec<Memory> = Vec::new();
+    for prefix in &args.memory_ids {
+        if let Some(m) = worker_store::find_by_prefix(db, prefix)
+            .await
+            .map_err(|e| format!("find_by_prefix: {:?}", e))?
+        {
+            memories.push(m);
+        }
+    }
+    if memories.is_empty() {
+        return Ok("No memories found for the provided ids.".to_string());
+    }
+
+    // Strongest co-activation signal: chosen-together is the bond we
+    // want to reinforce.
+    let ids: Vec<&str> = memories.iter().map(|m| m.id.as_str()).collect();
+    if ids.len() >= 2 {
+        let _ = worker_store::record_co_activation(db, &ids).await;
+    }
+    for m in &memories {
+        let _ = worker_store::touch(db, &m.id).await;
+    }
+
+    let mut out = String::from("═══ Specific recall ═══\n\n");
+    for m in &memories {
+        out.push_str(&format_memory(m));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct ReviewArgs {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn tool_review(db: &D1Database, args: Value) -> std::result::Result<String, String> {
+    let args: ReviewArgs =
+        serde_json::from_value(args).map_err(|e| format!("invalid review args: {}", e))?;
+    let limit = args.limit.unwrap_or(20);
+
+    let orientation = worker_store::get_orientation(db)
+        .await
+        .map_err(|e| format!("get_orientation: {:?}", e))?;
+    let active = worker_store::recall_active(db, 0.0, limit)
+        .await
+        .map_err(|e| format!("recall_active: {:?}", e))?;
+    let (ep, sem, ori) = worker_store::count_by_type(db).await.unwrap_or((0, 0, 0));
+
+    let mut out = format!(
+        "═══ Memoria Review ═══\nStore: {} episodic, {} semantic, {} orientation\n\n",
+        ep, sem, ori
+    );
+
+    if !orientation.is_empty() {
+        out.push_str("── Orientation ──\n");
+        for m in &orientation {
+            out.push_str(&format!(
+                "[{} | str:{:.2}] {}\n",
+                &m.id[..8],
+                m.strength,
+                m.summary
+            ));
+        }
+        out.push('\n');
+    }
+    if !active.is_empty() {
+        out.push_str("── Active memories (by strength) ──\n");
+        for m in &active {
+            out.push_str(&format!(
+                "[{} | {} | str:{:.2}] {}\n",
+                m.memory_type.as_str(),
+                &m.id[..8],
+                m.strength,
+                m.summary
+            ));
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Deserialize)]
+struct ReframeArgs {
+    memory_id: String,
+    new_content: String,
+    new_summary: String,
+}
+
+async fn tool_reframe(
+    env: &Env,
+    db: &D1Database,
+    args: Value,
+) -> std::result::Result<String, String> {
+    let args: ReframeArgs =
+        serde_json::from_value(args).map_err(|e| format!("invalid reframe args: {}", e))?;
+
+    let memory = worker_store::find_by_prefix(db, &args.memory_id)
+        .await
+        .map_err(|e| format!("find_by_prefix: {:?}", e))?
+        .ok_or_else(|| format!("No memory found for id `{}`", args.memory_id))?;
+
+    let updated = worker_store::reframe(db, &memory.id, &args.new_content, &args.new_summary)
+        .await
+        .map_err(|e| format!("reframe: {:?}", e))?;
+    if !updated {
+        return Err(format!("No memory updated for id `{}`", args.memory_id));
+    }
+
+    // Re-embed + Vectorize upsert so semantic recall reflects the new framing.
+    let embedding = worker_embed::embed_document(env, &args.new_content)
+        .await
+        .map_err(|e| format!("embed_document: {:?}", e))?;
+    worker_vectorize::upsert_one(env, &memory.id, &embedding)
+        .await
+        .map_err(|e| format!("vectorize upsert: {:?}", e))?;
+
+    Ok(format!(
+        "✓ Reframed: {} (id: {})",
+        args.new_summary,
+        &memory.id[..8]
+    ))
+}
+
+#[derive(Deserialize)]
+struct ForgetArgs {
+    memory_id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    reason: Option<String>,
+}
+
+async fn tool_forget(
+    env: &Env,
+    db: &D1Database,
+    args: Value,
+) -> std::result::Result<String, String> {
+    let args: ForgetArgs =
+        serde_json::from_value(args).map_err(|e| format!("invalid forget args: {}", e))?;
+
+    let memory = worker_store::find_by_prefix(db, &args.memory_id)
+        .await
+        .map_err(|e| format!("find_by_prefix: {:?}", e))?
+        .ok_or_else(|| format!("No memory found for id `{}`", args.memory_id))?;
+
+    if memory.memory_type == MemoryType::Orientation {
+        return Err("Orientation memories cannot be forgotten — identity is non-negotiable."
+            .to_string());
+    }
+
+    let removed = worker_store::forget(db, &memory.id)
+        .await
+        .map_err(|e| format!("forget: {:?}", e))?;
+    if !removed {
+        return Ok(format!("No memory removed for id `{}`", args.memory_id));
+    }
+
+    // Keep Vectorize in sync — stale vectors that don't resolve to D1
+    // rows would haunt future recalls otherwise.
+    let _ = worker_vectorize::delete_ids(env, &[memory.id.as_str()]).await;
+
+    Ok(format!(
+        "✓ Forgotten: {} (id: {}). Tombstone recorded.",
+        memory.summary,
+        &memory.id[..8]
+    ))
+}
+
+#[derive(Deserialize)]
+struct ReflectArgs {
+    conversation_highlights: String,
+    #[serde(default)]
+    memories_to_update: Vec<ReflectUpdate>,
+}
+
+#[derive(Deserialize)]
+struct ReflectUpdate {
+    memory_id: String,
+    new_content: String,
+    new_summary: String,
+}
+
+async fn tool_reflect(
+    env: &Env,
+    db: &D1Database,
+    args: Value,
+) -> std::result::Result<String, String> {
+    let args: ReflectArgs =
+        serde_json::from_value(args).map_err(|e| format!("invalid reflect args: {}", e))?;
+
+    let mut updated = 0usize;
+    let mut failed = 0usize;
+    for update in &args.memories_to_update {
+        let Some(memory) = worker_store::find_by_prefix(db, &update.memory_id)
+            .await
+            .map_err(|e| format!("find_by_prefix: {:?}", e))?
+        else {
+            failed += 1;
+            continue;
+        };
+        match worker_store::reframe(db, &memory.id, &update.new_content, &update.new_summary)
+            .await
+        {
+            Ok(true) => {
+                if let Ok(emb) = worker_embed::embed_document(env, &update.new_content).await {
+                    let _ = worker_vectorize::upsert_one(env, &memory.id, &emb).await;
+                }
+                updated += 1;
+            }
+            _ => failed += 1,
+        }
+    }
+
+    // Write the reflection itself as a new episodic memory tagged "reflection".
+    let summary_truncated: String = args
+        .conversation_highlights
+        .chars()
+        .take(80)
+        .collect::<String>();
+    let reflection = worker_store::create_memory_with_provenance(
+        db,
+        MemoryType::Episodic,
+        args.conversation_highlights.clone(),
+        format!("Conversation reflection: {}", summary_truncated),
+        None,
+        vec!["reflection".to_string()],
+        worker_auth_ctx::current_recorded_by(),
+    )
+    .await
+    .map_err(|e| format!("create reflection memory: {:?}", e))?;
+
+    let embedding = worker_embed::embed_document(env, &args.conversation_highlights)
+        .await
+        .map_err(|e| format!("embed reflection: {:?}", e))?;
+    worker_vectorize::upsert_one(env, &reflection.id, &embedding)
+        .await
+        .map_err(|e| format!("vectorize upsert reflection: {:?}", e))?;
+
+    Ok(format!(
+        "✓ Reflection complete.\n  New episodic memory: {}\n  Updated: {}\n  Failed: {}",
+        &reflection.id[..8],
+        updated,
+        failed
+    ))
 }
 
 /// Same shape as native main.rs::format_memory — keeps the recall output
