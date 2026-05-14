@@ -22,6 +22,7 @@ mod auth;
 mod auth_ctx;
 mod embed;
 mod key_rate;
+mod memory;
 mod store;
 
 use rmcp::{

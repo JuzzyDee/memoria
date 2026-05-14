@@ -11,6 +11,12 @@
 
 #![cfg(target_family = "wasm")]
 
+// Universal types — shared with the native bins via the same source files.
+mod memory;
+
+// Worker-side modules (wasm32-only).
+mod worker_store;
+
 use worker::{event, Context, Env, Request, Response, Result};
 
 #[event(fetch)]

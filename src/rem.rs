@@ -15,13 +15,15 @@
 //   Daytime   — active reflection via Claude Code (inference, expensive)
 //   Overnight — REM processing via this binary (computation, free)
 
-// These two modules are referenced transitively by store::init_schema —
+// These modules are referenced transitively by store::init_schema —
 // store.rs runs `crate::audit::SCHEMA_SQL` to provision the CLA-86
-// audit table, and audit.rs uses `crate::api_key::Role`. memoria-rem
-// doesn't otherwise touch auth or audit logic itself.
+// audit table, audit.rs uses `crate::api_key::Role`, and store re-exports
+// types from `crate::memory`. memoria-rem doesn't otherwise touch auth
+// or audit logic itself.
 mod api_key;
 mod audit;
 mod embed;
+mod memory;
 mod store;
 
 use std::path::PathBuf;
