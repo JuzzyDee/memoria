@@ -935,6 +935,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if cmd == "keygen" {
             return run_keygen(&args[2..]);
         }
+        if cmd == "migrate" {
+            return run_migrate(&args[2..]);
+        }
     }
 
     // Default database path — can be overridden with MEMORIA_DB env var
@@ -992,6 +995,188 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// not retain the raw key. The caller copies the raw key into the client's
 /// `.env` (e.g. rover's `MEMORIA_MCP_TOKEN`), and the hash entry into
 /// memoria's `MEMORIA_API_KEYS` (comma-separated list).
+/// `memoria migrate --to <url> --admin-key <key> [--limit <n>] [--dry-run]`
+///
+/// One-time data-migration tool for CLA-84 phase 8. Reads the local
+/// SQLite store (the same DB the native bin serves) and POSTs each
+/// memory verbatim to the deployed Worker's `/admin/import` endpoint,
+/// preserving id + timestamps + provenance. Images are read from
+/// `{db_parent}/images/{hash}.{ext}`, base64-encoded, and round-trip
+/// alongside the memory row.
+///
+/// Vectorize embeddings are re-generated worker-side (bge-base-en-v1.5)
+/// rather than ported — the local nomic-embed-text vectors aren't
+/// compatible with bge-base's space, so a fresh embed of each
+/// content string is the right move.
+fn run_migrate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    let mut to_url: Option<String> = None;
+    let mut admin_key: Option<String> = None;
+    let mut limit: Option<usize> = None;
+    let mut dry_run = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--to" => {
+                to_url = Some(
+                    args.get(i + 1)
+                        .ok_or("--to requires a URL")?
+                        .trim_end_matches('/')
+                        .to_string(),
+                );
+                i += 2;
+            }
+            "--admin-key" => {
+                admin_key = Some(
+                    args.get(i + 1)
+                        .ok_or("--admin-key requires a value")?
+                        .to_string(),
+                );
+                i += 2;
+            }
+            "--limit" => {
+                limit = Some(
+                    args.get(i + 1)
+                        .ok_or("--limit requires a value")?
+                        .parse()
+                        .map_err(|e| format!("--limit must be a number: {}", e))?,
+                );
+                i += 2;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            "--help" | "-h" => {
+                eprintln!(
+                    "Usage: memoria migrate --to <url> --admin-key <key> \
+                     [--limit <n>] [--dry-run]"
+                );
+                return Ok(());
+            }
+            other => return Err(format!("unknown arg: {}", other).into()),
+        }
+    }
+    let to_url = to_url.ok_or("--to is required (e.g. --to https://memoria.x.workers.dev)")?;
+    let admin_key = admin_key.ok_or("--admin-key is required")?;
+
+    let db_path = std::env::var("MEMORIA_DB")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let mut path = dirs_or_default();
+            path.push("memoria.db");
+            path
+        });
+    let images_dir = db_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("images");
+
+    let store = MemoryStore::open(&db_path)?;
+    let orientation = store.get_orientation()?;
+    let active = store.recall_active(0.0, limit.unwrap_or(100_000))?;
+
+    // Build the full migration set: orientation first, then active by
+    // strength descending. recall_active already excludes orientation.
+    let mut all: Vec<store::Memory> = Vec::with_capacity(orientation.len() + active.len());
+    all.extend(orientation);
+    all.extend(active);
+
+    eprintln!(
+        "Found {} memories to migrate ({} with images)",
+        all.len(),
+        all.iter().filter(|m| m.image_hash.is_some()).count()
+    );
+    if dry_run {
+        for m in &all {
+            eprintln!(
+                "  {} {} {} {}",
+                &m.id[..8],
+                m.memory_type.as_str(),
+                if m.image_hash.is_some() { "[img]" } else { "     " },
+                m.summary
+            );
+        }
+        eprintln!("Dry run — no requests made.");
+        return Ok(());
+    }
+
+    let import_url = format!("{}/admin/import", to_url);
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+
+    for (idx, m) in all.iter().enumerate() {
+        let mut payload = serde_json::json!({ "memory": m });
+        if let Some(hash) = &m.image_hash {
+            let mime = m.image_mime.as_deref().unwrap_or("image/jpeg");
+            let ext = match mime {
+                "image/jpeg" => "jpg",
+                "image/png" => "png",
+                "image/webp" => "webp",
+                _ => "bin",
+            };
+            let path = images_dir.join(format!("{}.{}", hash, ext));
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    payload["image_base64"] = serde_json::Value::String(BASE64.encode(&bytes));
+                    payload["image_mime"] = serde_json::Value::String(mime.to_string());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  [{}/{}] ⚠ {} image at {:?} unreadable: {}; sending without image",
+                        idx + 1,
+                        all.len(),
+                        &m.id[..8],
+                        path,
+                        e
+                    );
+                }
+            }
+        }
+
+        let result = ureq::post(&import_url)
+            .header("Authorization", &format!("Bearer {}", admin_key))
+            .header("Content-Type", "application/json")
+            .send_json(&payload);
+
+        match result {
+            Ok(_) => {
+                succeeded += 1;
+                eprintln!(
+                    "  [{}/{}] ✓ {} {}",
+                    idx + 1,
+                    all.len(),
+                    &m.id[..8],
+                    m.summary
+                );
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!(
+                    "  [{}/{}] ✗ {} {} — {}",
+                    idx + 1,
+                    all.len(),
+                    &m.id[..8],
+                    m.summary,
+                    e
+                );
+            }
+        }
+    }
+
+    eprintln!(
+        "\nMigration complete: {} succeeded, {} failed (of {})",
+        succeeded,
+        failed,
+        all.len()
+    );
+    if failed > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn run_keygen(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut role: Option<api_key::Role> = None;
     let mut i = 0;

@@ -78,14 +78,19 @@ pub struct Memory {
     /// On native this is loaded from the SQLite blob column; on wasm32
     /// (post-CLA-84) the vector lives in Vectorize and this field is
     /// typically None on Memory instances flowing through the worker.
+    /// Skipped in serde because it's huge and reconstructable.
     #[serde(skip)]
     pub embedding: Option<Vec<f64>>,
     /// Optional: SHA-256 hex hash of the associated image file.
-    /// The actual bytes live at {images_dir}/{hash}.{ext} (content-addressed storage).
-    #[serde(skip)]
+    /// On native the bytes live at {images_dir}/{hash}.{ext} (content-
+    /// addressed storage); on the worker they live in R2 under the same
+    /// key shape. Serialized so the migration path (CLA-84 phase 8) can
+    /// round-trip image metadata.
+    #[serde(default)]
     pub image_hash: Option<String>,
-    /// Optional: MIME type of the image (e.g. "image/jpeg"). Determines file extension.
-    #[serde(skip)]
+    /// Optional: MIME type of the image (e.g. "image/jpeg"). Determines
+    /// file extension. Same serialization rationale as `image_hash`.
+    #[serde(default)]
     pub image_mime: Option<String>,
     /// Optional: provenance — who or what recorded this memory.
     /// Server-controlled (set from auth context); any client-supplied value

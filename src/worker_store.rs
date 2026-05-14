@@ -198,6 +198,58 @@ pub async fn recall_active(
     Ok(rows.into_iter().map(MemoryRow::into_memory).collect())
 }
 
+/// INSERT a memory record verbatim — preserves the caller's id,
+/// timestamps, strength, all fields exactly. Used by /admin/import
+/// during data migration (CLA-84 phase 8) so the migrated rows keep
+/// their original ids (the 8-char prefixes you've memorized) and their
+/// original chronology.
+///
+/// This bypasses every "server-controlled" rule the regular create
+/// paths enforce — that's intentional, because the data being imported
+/// came from a trusted local DB. Reuse outside the migration path
+/// requires careful thought; the endpoint should stay admin-only.
+pub async fn insert_memory_verbatim(db: &D1Database, m: &Memory) -> Result<()> {
+    let tags_json = serde_json::to_string(&m.tags).unwrap_or_else(|_| "[]".to_string());
+    db.prepare(
+        "INSERT INTO memories
+            (id, memory_type, content, summary, created_at, last_accessed,
+             access_count, strength, stability, entity, tags, image_hash,
+             image_mime, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&[
+        m.id.clone().into(),
+        m.memory_type.as_str().into(),
+        m.content.clone().into(),
+        m.summary.clone().into(),
+        m.created_at.to_rfc3339().into(),
+        m.last_accessed.to_rfc3339().into(),
+        (m.access_count as i32).into(),
+        m.strength.into(),
+        m.stability.into(),
+        match &m.entity {
+            Some(e) => e.clone().into(),
+            None => worker::wasm_bindgen::JsValue::NULL,
+        },
+        tags_json.into(),
+        match &m.image_hash {
+            Some(h) => h.clone().into(),
+            None => worker::wasm_bindgen::JsValue::NULL,
+        },
+        match &m.image_mime {
+            Some(t) => t.clone().into(),
+            None => worker::wasm_bindgen::JsValue::NULL,
+        },
+        match &m.recorded_by {
+            Some(r) => r.clone().into(),
+            None => worker::wasm_bindgen::JsValue::NULL,
+        },
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
+
 /// Bulk fetch by a list of ids. Used after a Vectorize query returns
 /// top-k matches and we need to resolve each id to a full Memory row.
 /// Order is NOT preserved relative to the input — callers can re-order

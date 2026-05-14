@@ -17,6 +17,7 @@ mod key_rate;
 mod memory;
 
 // Worker-side modules (wasm32-only).
+mod worker_admin;
 mod worker_audit;
 mod worker_auth_ctx;
 mod worker_embed;
@@ -46,6 +47,11 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         // MCP — authenticated, scope-gated, audited. Accepts both
         // OAuth bearer tokens and service API keys.
         (Method::Post, "/mcp") => mcp_endpoint(&env, &mut req).await,
+
+        // Admin import — verbatim memory write for the data migration
+        // (CLA-84 phase 8) and future disaster-recovery flows. Auth via
+        // MEMORIA_ADMIN_KEY secret, NOT the per-role service-key allowlist.
+        (Method::Post, "/admin/import") => worker_admin::handle_import(&env, &mut req).await,
 
         // OAuth 2.1 — Authorization Code + Client Credentials grants.
         (Method::Get, "/.well-known/oauth-protected-resource") => {
