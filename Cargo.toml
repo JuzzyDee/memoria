@@ -74,6 +74,13 @@ serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+# wasm32-unknown-unknown has no OS clock — chrono falls through to
+# std::time::SystemTime by default which panics with "time not implemented
+# on this platform". The `wasmbind` feature routes chrono's clock through
+# js_sys::Date::now() instead. Cargo unions feature sets across the dep
+# tree; some transitive consumer disables chrono's defaults, so we have
+# to enable wasmbind explicitly on the wasm target.
+chrono = { version = "0.4", features = ["serde", "clock", "wasmbind"] }
 # tokio::task_local! — used to propagate the per-request auth context
 # through the rmcp dispatch chain. wasm32-friendly subset (no rt-multi-thread,
 # no IO drivers).

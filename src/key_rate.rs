@@ -12,7 +12,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
 /// Default per-key budget — sized well above the rover's 12s heartbeat
 /// (which produces ~5 calls/min) so legitimate operation is unaffected,
@@ -20,7 +19,15 @@ use std::time::{Duration, Instant};
 /// than a fire-hose.
 pub const READ_LIMIT_PER_MIN: usize = 60;
 pub const WRITE_LIMIT_PER_MIN: usize = 10;
-const WINDOW: Duration = Duration::from_secs(60);
+const WINDOW_MS: i64 = 60_000;
+
+/// Epoch millis "now". chrono routes through `js_sys::Date::now()` on
+/// wasm32 (via the `wasmbind` feature) and through the OS clock on
+/// native — both work without invoking `std::time` which panics on
+/// wasm32-unknown-unknown.
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
 
 #[derive(Debug)]
 pub struct RateLimited {
@@ -29,14 +36,14 @@ pub struct RateLimited {
 
 #[derive(Debug, Default)]
 struct Bucket {
-    reads: VecDeque<Instant>,
-    writes: VecDeque<Instant>,
+    reads: VecDeque<i64>,
+    writes: VecDeque<i64>,
 }
 
 impl Bucket {
-    fn prune(buf: &mut VecDeque<Instant>, now: Instant) {
+    fn prune(buf: &mut VecDeque<i64>, now: i64) {
         while let Some(&front) = buf.front() {
-            if now.duration_since(front) > WINDOW {
+            if now - front > WINDOW_MS {
                 buf.pop_front();
             } else {
                 break;
@@ -45,7 +52,7 @@ impl Bucket {
     }
 
     fn count_and_check(&mut self, is_write: bool) -> Result<(), RateLimited> {
-        let now = Instant::now();
+        let now = now_ms();
         let (buf, limit) = if is_write {
             (&mut self.writes, WRITE_LIMIT_PER_MIN)
         } else {
