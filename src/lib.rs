@@ -24,10 +24,11 @@ mod worker_embed;
 mod worker_mcp;
 mod worker_mmr;
 mod worker_oauth;
+mod worker_rem;
 mod worker_store;
 mod worker_vectorize;
 
-use worker::{event, Context, Env, Method, Request, Response, Result};
+use worker::{event, Context, Env, Method, Request, Response, Result, ScheduleContext, ScheduledEvent};
 
 #[event(fetch)]
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
@@ -122,4 +123,31 @@ async fn handle_token_form(env: &Env, req: &mut Request) -> Result<Response> {
     let body = req.text().await?;
     let form = worker_oauth::parse_form(&body);
     worker_oauth::handle_token_post(env, form).await
+}
+
+/// REM consolidator — runs nightly per the cron trigger in wrangler.toml.
+/// Apply decay → find candidate pairs → cluster → consolidate via Haiku
+/// → dispatch additive operations. See worker_rem.rs for the metabolism.
+#[event(scheduled)]
+pub async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    match worker_rem::run(&env).await {
+        Ok(summary) => {
+            worker::console_log!(
+                "REM run complete: decayed={} clusters={} created={} appended={} revised={} skipped={} errors={}",
+                summary.decayed,
+                summary.clusters_attempted,
+                summary.decisions_created,
+                summary.decisions_appended,
+                summary.decisions_revised,
+                summary.decisions_skipped,
+                summary.errors.len()
+            );
+            for err in &summary.errors {
+                worker::console_error!("REM partial error: {}", err);
+            }
+        }
+        Err(e) => {
+            worker::console_error!("REM run failed catastrophically: {:?}", e);
+        }
+    }
 }

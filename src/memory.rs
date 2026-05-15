@@ -39,9 +39,17 @@ impl MemoryType {
 
     /// Base stability for new memories of this type.
     /// Higher = decays slower. Orientation is effectively permanent.
+    ///
+    /// Episodic stability was raised from 1.0 to 7.0 in CLA-87 to counter
+    /// the decay-asymmetry problem: with stability=1.0 a new memory not
+    /// retrieved by semantic match in its first week dies before it had
+    /// a chance to be load-bearing in a future context. At stability=7.0
+    /// the same memory decays to ~0.37 at 7 days and ~0.014 at 30 days,
+    /// widening the gauntlet from a week to a month — long enough for
+    /// the conversation that would have naturally surfaced it to happen.
     pub fn base_stability(&self) -> f64 {
         match self {
-            MemoryType::Episodic => 1.0,      // decays in days without reinforcement
+            MemoryType::Episodic => 7.0,      // decays in ~30 days without reinforcement
             MemoryType::Semantic => 7.0,      // decays in weeks
             MemoryType::Orientation => 365.0, // effectively permanent
         }

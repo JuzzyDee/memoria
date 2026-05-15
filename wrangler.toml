@@ -99,7 +99,16 @@ id = "9458dc8b95fa40b0b7f1e162abb4f8b1"
 # new_classes = ["AuthCodesObject"]
 
 # ──────────────────────────────────────────────────────────────────────
+# Cron triggers — REM consolidator runs nightly (CLA-87). 14:00 UTC =
+# 00:00 AEST. Brisbane doesn't observe DST so this is year-round stable.
+# ──────────────────────────────────────────────────────────────────────
+[triggers]
+crons = ["0 14 * * *"]
+
+# ──────────────────────────────────────────────────────────────────────
 # Secrets (set via `wrangler secret put`, not committed):
-#   MEMORIA_API_KEYS   — semicolon-separated rover:<argon2-hash> entries
-#                        (CLA-86 service-key list)
+#   MEMORIA_API_KEYS    — semicolon-separated rover:<argon2-hash> entries
+#                         (CLA-86 service-key list)
+#   ANTHROPIC_API_KEY   — used by the REM consolidator to call Haiku 4.5
+#                         for the consolidation judgment (CLA-87)
 # ──────────────────────────────────────────────────────────────────────

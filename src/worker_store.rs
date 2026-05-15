@@ -666,14 +666,16 @@ pub async fn create_memory_with_image_and_provenance(
     })
 }
 
-/// Consolidate two parent memories into a new semantic one. Mirrors the
-/// native store's behaviour: synthesized semantic memory carries
-/// `recorded_by = "rem"` (the consolidator's provenance), and the
-/// stability is boosted based on combined parent access counts.
+/// **LEGACY — DO NOT USE FROM NEW CODE.**
 ///
-/// The merged content + summary are supplied by the caller (typically
-/// the REM dialectic). Entity is inherited if both parents agree;
-/// otherwise None. Tags from both parents are unioned.
+/// This is the pre-CLA-87 merge-and-replace consolidation pattern, where
+/// two parent memories were folded into one synthesized semantic. It's
+/// kept temporarily for native-side compatibility and to preserve the
+/// historical contract, but the worker-side REM consolidator (CLA-87)
+/// uses the additive pattern instead — see `create_semantic_with_lineage`
+/// and `update_semantic_with_lineage`, which preserve the source
+/// episodics rather than destroying them.
+#[allow(dead_code)]
 pub async fn consolidate(
     db: &D1Database,
     parent_a: &Memory,
@@ -716,4 +718,164 @@ pub async fn consolidate(
         stability: boosted_stability,
         ..memory
     })
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// CLA-87 — Additive consolidation primitives
+//
+// The post-CLA-87 consolidation model preserves source episodics rather
+// than destroying them. REM produces semantic memories that *cite* their
+// source episodics via the `consolidation_lineage` junction table; the
+// episodics themselves remain in the store and continue to be retrievable
+// independently. MMR-rerank at recall time handles the dilution that the
+// old merge-and-replace pattern was trying to solve at consolidation time.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Find candidate pairs for REM consolidation. Filters applied:
+///
+///   * `count >= min_count` — only pairs with non-trivial Hebbian bond
+///   * neither memory is an orientation (orientations don't consolidate)
+///   * neither memory is already a `source_id` in `consolidation_lineage`
+///     (it's already been folded into some existing semantic)
+///   * neither memory is already a `parent_id` in `consolidation_lineage`
+///     (don't re-consolidate consolidated semantics with their siblings)
+///
+/// Returns `(memory_a_id, memory_b_id, count)` tuples, ordered by count
+/// descending. The REM worker then runs union-find over these pairs to
+/// build connected components (clusters) for the Haiku call.
+pub async fn find_consolidation_pairs(
+    db: &D1Database,
+    min_count: u32,
+    limit: u32,
+) -> Result<Vec<(String, String, u32)>> {
+    #[derive(serde::Deserialize)]
+    struct PairRow {
+        memory_a: String,
+        memory_b: String,
+        count: u32,
+    }
+
+    let rows: Vec<PairRow> = db
+        .prepare(
+            "SELECT memory_a, memory_b, count
+             FROM co_activations
+             WHERE count >= ?
+               AND memory_a IN (SELECT id FROM memories WHERE memory_type != 'orientation')
+               AND memory_b IN (SELECT id FROM memories WHERE memory_type != 'orientation')
+               AND memory_a NOT IN (SELECT source_id FROM consolidation_lineage)
+               AND memory_b NOT IN (SELECT source_id FROM consolidation_lineage)
+               AND memory_a NOT IN (SELECT parent_id FROM consolidation_lineage)
+               AND memory_b NOT IN (SELECT parent_id FROM consolidation_lineage)
+             ORDER BY count DESC
+             LIMIT ?",
+        )
+        .bind(&[min_count.into(), limit.into()])?
+        .all()
+        .await?
+        .results()?;
+
+    Ok(rows.into_iter()
+        .map(|r| (r.memory_a, r.memory_b, r.count))
+        .collect())
+}
+
+/// Create a new semantic memory consolidated from one or more source
+/// episodics. Inserts the memory row and one `consolidation_lineage`
+/// row per source. The source episodics are NOT modified.
+///
+/// `recorded_by` is set to `"rem-worker"` automatically — the
+/// consolidator's provenance, which lets audit queries answer
+/// "what did REM write last night?" trivially.
+pub async fn create_semantic_with_lineage(
+    db: &D1Database,
+    content: String,
+    summary: String,
+    entity: Option<String>,
+    tags: Vec<String>,
+    source_ids: &[&str],
+) -> Result<Memory> {
+    let memory = create_memory_with_provenance(
+        db,
+        MemoryType::Semantic,
+        content,
+        summary,
+        entity,
+        tags,
+        Some("rem-worker".to_string()),
+    )
+    .await?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for source_id in source_ids {
+        db.prepare(
+            "INSERT OR IGNORE INTO consolidation_lineage
+                (parent_id, source_id, created_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(&[
+            memory.id.clone().into(),
+            (*source_id).into(),
+            now.clone().into(),
+        ])?
+        .run()
+        .await?;
+    }
+
+    Ok(memory)
+}
+
+/// Update an existing semantic memory's content + summary AND add new
+/// source episodics to its lineage. Used by REM when Haiku's decision
+/// is `append` or `revise` — same SQL shape, the prompt-level semantic
+/// difference lives upstream in the worker_rem dispatch.
+///
+/// Returns true if a row was updated. The memory's `recorded_by` is
+/// preserved (was set when the semantic was first created); the
+/// "REM updated this on date X" fact lives in the audit log instead.
+pub async fn update_semantic_with_lineage(
+    db: &D1Database,
+    id: &str,
+    new_content: &str,
+    new_summary: &str,
+    additional_source_ids: &[&str],
+) -> Result<bool> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = db
+        .prepare(
+            "UPDATE memories
+             SET content = ?, summary = ?, last_accessed = ?
+             WHERE id = ? AND memory_type = 'semantic'",
+        )
+        .bind(&[
+            new_content.into(),
+            new_summary.into(),
+            now.clone().into(),
+            id.into(),
+        ])?
+        .run()
+        .await?;
+
+    let updated = result
+        .meta()
+        .ok()
+        .flatten()
+        .and_then(|m| m.changes)
+        .unwrap_or(0)
+        > 0;
+    if !updated {
+        return Ok(false);
+    }
+
+    for source_id in additional_source_ids {
+        db.prepare(
+            "INSERT OR IGNORE INTO consolidation_lineage
+                (parent_id, source_id, created_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(&[id.into(), (*source_id).into(), now.clone().into()])?
+        .run()
+        .await?;
+    }
+
+    Ok(true)
 }
