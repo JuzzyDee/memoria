@@ -122,7 +122,8 @@ This is a **deploy-your-own** setup. There's no hosted instance.
 ### Prerequisites
 
 - [Cloudflare account](https://cloudflare.com) — free tier handles typical single-user volume; upgrade only if you hit Workers AI or D1 limits
-- [Anthropic API key](https://console.anthropic.com) — the REM cron calls Haiku 4.5
+- [Claude Pro, Max, Team, or Enterprise subscription](https://claude.com/pricing) — the REM consolidator authenticates via a long-lived OAuth token from your subscription, drawing from your Extra Usage credit pool
+- [Claude Code](https://claude.com/claude-code) — needed once to generate the long-lived OAuth token via `claude setup-token`
 - [Rust toolchain](https://rustup.rs/) with the `wasm32-unknown-unknown` target
 - [`wrangler`](https://developers.cloudflare.com/workers/wrangler/install-and-update/)
 
@@ -149,11 +150,23 @@ wrangler kv namespace create MEMORIA_TOKENS
 wrangler r2 bucket create memoria-images
 ```
 
+### Generate the long-lived OAuth token
+
+The REM consolidator (and any future Worker-side Haiku traffic) authenticates against Anthropic via a long-lived OAuth token tied to your Claude subscription. Generate it once with Claude Code:
+
+```bash
+claude setup-token       # interactive browser auth, one-time
+# copy the printed token — it's a ~1-year OAuth token (prefix sk-ant-oat01-)
+# bound to your subscription. Spend draws from your Extra Usage credit pool.
+```
+
+Re-run any time it expires or you want to rotate. Revoke old tokens at [claude.ai/settings/claude-code](https://claude.ai/settings/claude-code) — note that `claude logout` does **not** revoke server-side.
+
 ### Set secrets
 
 ```bash
 # Required
-wrangler secret put ANTHROPIC_API_KEY              # REM consolidator (Haiku 4.5)
+wrangler secret put CLAUDE_CODE_OAUTH_TOKEN        # paste the token from `claude setup-token`
 wrangler secret put MEMORIA_OAUTH_CLIENT_ID        # generate yourself, e.g. openssl rand -hex 16
 wrangler secret put MEMORIA_OAUTH_CLIENT_SECRET    # generate yourself, e.g. openssl rand -hex 32
 
