@@ -1,0 +1,12 @@
+# Local dev secrets for `wrangler dev`. Copy to .dev.vars and fill in.
+#
+# .dev.vars is gitignored (never commit secrets). For production, push
+# these as wrangler secrets:
+#   wrangler secret put MEMORIA_API_KEYS
+
+# CLA-86 service API keys — semicolon-separated `<role>:<argon2-hash>`
+# entries. Generate via `cargo run --bin memoria -- keygen --role rover`,
+# paste the HASH side here (raw side goes in the rover's .env).
+MEMORIA_API_KEYS=
+
+# Future: any other dev-time secrets land here.

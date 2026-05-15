@@ -4,4 +4,11 @@
 *.db-wal
 *.db-shm
 rem.log
+migration-*.log
 .claude/
+
+# Cloudflare Workers (CLA-84)
+.dev.vars
+.wrangler/
+build/
+node_modules/
