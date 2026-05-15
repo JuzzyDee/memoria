@@ -166,7 +166,11 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
         Ok(p) => p,
         Err(e) => {
             summary.errors.push(format!("find_pairs: {:?}", e));
-            let _ = worker_rem_audit::record_run_finish(&db, &run_id, 0, &summary).await;
+            if let Err(audit_e) =
+                worker_rem_audit::record_run_finish(&db, &run_id, 0, &summary).await
+            {
+                worker::console_error!("audit run_finish (after find_pairs err): {:?}", audit_e);
+            }
             return Ok(summary);
         }
     };
@@ -174,7 +178,11 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
     let pairs_found = pairs.len();
 
     if pairs.is_empty() {
-        let _ = worker_rem_audit::record_run_finish(&db, &run_id, pairs_found, &summary).await;
+        if let Err(e) =
+            worker_rem_audit::record_run_finish(&db, &run_id, pairs_found, &summary).await
+        {
+            worker::console_error!("audit run_finish (empty pairs): {:?}", e);
+        }
         return Ok(summary);
     }
 
@@ -201,7 +209,10 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
         }
     }
 
-    let _ = worker_rem_audit::record_run_finish(&db, &run_id, pairs_found, &summary).await;
+    if let Err(e) = worker_rem_audit::record_run_finish(&db, &run_id, pairs_found, &summary).await
+    {
+        worker::console_error!("audit run_finish: {:?}", e);
+    }
     Ok(summary)
 }
 
@@ -305,12 +316,13 @@ async fn process_cluster(
 
         // Audit the decision (and Haiku's rationale) regardless of
         // dispatch success — the cognitive judgment was made even if
-        // the SQL write that followed failed.
+        // the SQL write that followed failed. Audit failures surface
+        // into summary.errors so we never silently lose observability.
         let result_memory_id_str = match &dispatch_result {
             Ok(Some(id)) => Some(id.as_str()),
             _ => None,
         };
-        let _ = worker_rem_audit::record_decision(
+        if let Err(e) = worker_rem_audit::record_decision(
             db,
             run_id,
             cluster_idx,
@@ -321,7 +333,12 @@ async fn process_cluster(
             result_memory_id_str,
             &decision.rationale,
         )
-        .await;
+        .await
+        {
+            summary
+                .errors
+                .push(format!("audit decision (cluster {}): {:?}", cluster_idx, e));
+        }
 
         match dispatch_result {
             Ok(_) => match decision.action {

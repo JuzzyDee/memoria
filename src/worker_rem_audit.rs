@@ -59,14 +59,14 @@ pub async fn record_run_finish(
     )
     .bind(&[
         now.into(),
-        (summary.decayed as i64).into(),
-        (pairs_found as i64).into(),
-        (summary.clusters_attempted as i64).into(),
-        (summary.decisions_created as i64).into(),
-        (summary.decisions_appended as i64).into(),
-        (summary.decisions_revised as i64).into(),
-        (summary.decisions_skipped as i64).into(),
-        (summary.errors.len() as i64).into(),
+        (summary.decayed as i32).into(),
+        (pairs_found as i32).into(),
+        (summary.clusters_attempted as i32).into(),
+        (summary.decisions_created as i32).into(),
+        (summary.decisions_appended as i32).into(),
+        (summary.decisions_revised as i32).into(),
+        (summary.decisions_skipped as i32).into(),
+        (summary.errors.len() as i32).into(),
         errors_json.into(),
         run_id.into(),
     ])?
@@ -104,7 +104,7 @@ pub async fn record_decision(
     .bind(&[
         decision_id.into(),
         run_id.into(),
-        (cluster_idx as i64).into(),
+        (cluster_idx as i32).into(),
         relationship_assessment.into(),
         action.into(),
         members_json.into(),
