@@ -439,7 +439,7 @@ async fn consolidate_via_claude(
     intra_edges: &[&(String, String, u32)],
     related: &[Memory],
 ) -> Result<Vec<ConsolidationDecision>> {
-    let api_key = env.secret("ANTHROPIC_API_KEY")?.to_string();
+    let oauth_token = env.secret("CLAUDE_CODE_OAUTH_TOKEN")?.to_string();
     let user_message = format_cluster_for_haiku(cluster, intra_edges, related);
 
     let tool_definition = json!({
@@ -506,7 +506,7 @@ async fn consolidate_via_claude(
     });
 
     let mut headers = Headers::new();
-    headers.set("x-api-key", &api_key)?;
+    headers.set("Authorization", &format!("Bearer {}", oauth_token))?;
     headers.set("anthropic-version", "2023-06-01")?;
     headers.set("content-type", "application/json")?;
 
