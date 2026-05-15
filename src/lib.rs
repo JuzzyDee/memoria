@@ -25,6 +25,7 @@ mod worker_mcp;
 mod worker_mmr;
 mod worker_oauth;
 mod worker_rem;
+mod worker_rem_audit;
 mod worker_store;
 mod worker_vectorize;
 

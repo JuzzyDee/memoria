@@ -31,7 +31,7 @@
 #![cfg(target_family = "wasm")]
 
 use crate::memory::{Memory, MemoryType};
-use crate::{worker_embed, worker_store, worker_vectorize};
+use crate::{worker_embed, worker_rem_audit, worker_store, worker_vectorize};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -82,13 +82,11 @@ enum DecisionAction {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ConsolidationDecision {
-    #[allow(dead_code)] // Used for audit/observability only — not dispatched on.
     relationship_assessment: RelationshipAssessment,
     action: DecisionAction,
     members: Vec<String>,
     #[serde(default)]
     existing_considered: Option<String>,
-    #[allow(dead_code)] // Audit/observability — logged but not dispatched on.
     rationale: String,
     #[serde(default)]
     semantic_entry: Option<String>,
@@ -98,6 +96,23 @@ struct ConsolidationDecision {
     entity: Option<String>,
     #[serde(default)]
     tags: Option<Vec<String>>,
+}
+
+fn relationship_assessment_str(r: &RelationshipAssessment) -> &'static str {
+    match r {
+        RelationshipAssessment::Coincidental => "coincidental",
+        RelationshipAssessment::Tangential => "tangential",
+        RelationshipAssessment::SemanticallyMeaningful => "semantically_meaningful",
+    }
+}
+
+fn decision_action_str(a: &DecisionAction) -> &'static str {
+    match a {
+        DecisionAction::Skip => "skip",
+        DecisionAction::Append => "append",
+        DecisionAction::Revise => "revise",
+        DecisionAction::Create => "create",
+    }
 }
 
 /// Telemetry returned by `run()`. Logged by the scheduled handler.
@@ -121,6 +136,19 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
     let db = env.d1("DB")?;
     let mut summary = RunSummary::default();
 
+    // Open the audit row before doing anything else so all subsequent
+    // decision-level writes can correlate to this run.
+    let run_id = match worker_rem_audit::record_run_start(&db).await {
+        Ok(id) => id,
+        Err(e) => {
+            // Audit failure shouldn't abort REM — log it and continue
+            // with a synthetic id (decision writes will fail FK but
+            // the actual consolidation work still lands).
+            summary.errors.push(format!("audit start: {:?}", e));
+            uuid::Uuid::new_v4().to_string()
+        }
+    };
+
     // 1. Apply Ebbinghaus decay across the non-orientation corpus.
     match worker_store::apply_decay(&db).await {
         Ok(n) => summary.decayed = n,
@@ -138,11 +166,15 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
         Ok(p) => p,
         Err(e) => {
             summary.errors.push(format!("find_pairs: {:?}", e));
+            let _ = worker_rem_audit::record_run_finish(&db, &run_id, 0, &summary).await;
             return Ok(summary);
         }
     };
 
+    let pairs_found = pairs.len();
+
     if pairs.is_empty() {
+        let _ = worker_rem_audit::record_run_finish(&db, &run_id, pairs_found, &summary).await;
         return Ok(summary);
     }
 
@@ -153,12 +185,23 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
 
     // 4. For each cluster: fetch memories, find related semantics,
     //    call Haiku, dispatch decisions.
-    for cluster_ids in &clusters {
-        if let Err(e) = process_cluster(env, &db, cluster_ids, &pairs, &mut summary).await {
-            summary.errors.push(format!("cluster: {:?}", e));
+    for (cluster_idx, cluster_ids) in clusters.iter().enumerate() {
+        if let Err(e) = process_cluster(
+            env,
+            &db,
+            &run_id,
+            cluster_idx,
+            cluster_ids,
+            &pairs,
+            &mut summary,
+        )
+        .await
+        {
+            summary.errors.push(format!("cluster {}: {:?}", cluster_idx, e));
         }
     }
 
+    let _ = worker_rem_audit::record_run_finish(&db, &run_id, pairs_found, &summary).await;
     Ok(summary)
 }
 
@@ -226,6 +269,8 @@ fn cluster_pairs(
 async fn process_cluster(
     env: &Env,
     db: &D1Database,
+    run_id: &str,
+    cluster_idx: usize,
     cluster_ids: &[String],
     all_pairs: &[(String, String, u32)],
     summary: &mut RunSummary,
@@ -250,20 +295,44 @@ async fn process_cluster(
     let decisions = match consolidate_via_claude(env, &memories, &intra_edges, &related).await {
         Ok(d) => d,
         Err(e) => {
-            summary.errors.push(format!("Haiku: {:?}", e));
+            summary.errors.push(format!("Haiku cluster {}: {:?}", cluster_idx, e));
             return Ok(());
         }
     };
 
-    for decision in decisions {
-        match dispatch_decision(env, db, &decision).await {
-            Ok(()) => match decision.action {
+    for decision in &decisions {
+        let dispatch_result = dispatch_decision(env, db, decision).await;
+
+        // Audit the decision (and Haiku's rationale) regardless of
+        // dispatch success — the cognitive judgment was made even if
+        // the SQL write that followed failed.
+        let result_memory_id_str = match &dispatch_result {
+            Ok(Some(id)) => Some(id.as_str()),
+            _ => None,
+        };
+        let _ = worker_rem_audit::record_decision(
+            db,
+            run_id,
+            cluster_idx,
+            relationship_assessment_str(&decision.relationship_assessment),
+            decision_action_str(&decision.action),
+            &decision.members,
+            decision.existing_considered.as_deref(),
+            result_memory_id_str,
+            &decision.rationale,
+        )
+        .await;
+
+        match dispatch_result {
+            Ok(_) => match decision.action {
                 DecisionAction::Skip => summary.decisions_skipped += 1,
                 DecisionAction::Append => summary.decisions_appended += 1,
                 DecisionAction::Revise => summary.decisions_revised += 1,
                 DecisionAction::Create => summary.decisions_created += 1,
             },
-            Err(e) => summary.errors.push(format!("dispatch: {:?}", e)),
+            Err(e) => summary
+                .errors
+                .push(format!("dispatch cluster {}: {:?}", cluster_idx, e)),
         }
     }
 
@@ -531,13 +600,16 @@ fn format_cluster_for_haiku(
 
 // ──── Decision dispatch ─────────────────────────────────────────────────
 
+/// Returns the memory_id of the created/updated semantic, or None for
+/// `Skip`. The audit layer uses this to populate `result_memory_id`
+/// in `rem_decisions`.
 async fn dispatch_decision(
     env: &Env,
     db: &D1Database,
     decision: &ConsolidationDecision,
-) -> Result<()> {
+) -> Result<Option<String>> {
     match decision.action {
-        DecisionAction::Skip => Ok(()),
+        DecisionAction::Skip => Ok(None),
 
         DecisionAction::Create => {
             let content = decision.semantic_entry.as_ref().ok_or_else(|| {
@@ -560,7 +632,7 @@ async fn dispatch_decision(
 
             let emb = worker_embed::embed_document(env, content).await?;
             worker_vectorize::upsert_one(env, &created.id, &emb).await?;
-            Ok(())
+            Ok(Some(created.id))
         }
 
         DecisionAction::Append | DecisionAction::Revise => {
@@ -587,8 +659,10 @@ async fn dispatch_decision(
             if updated {
                 let emb = worker_embed::embed_document(env, content).await?;
                 worker_vectorize::upsert_one(env, target_id, &emb).await?;
+                Ok(Some(target_id.clone()))
+            } else {
+                Ok(None)
             }
-            Ok(())
         }
     }
 }
