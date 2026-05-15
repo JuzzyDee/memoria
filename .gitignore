@@ -4,6 +4,7 @@
 *.db-wal
 *.db-shm
 rem.log
+migration-*.log
 .claude/
 
 # Cloudflare Workers (CLA-84)
