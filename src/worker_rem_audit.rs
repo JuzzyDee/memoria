@@ -31,6 +31,46 @@ pub async fn record_run_start(db: &D1Database) -> Result<String> {
     Ok(run_id)
 }
 
+/// Look up the `started_at` of the most recent *successfully finished*
+/// REM run. Used by the CLA-94 freshness gate as a dynamic cutoff:
+/// memories accessed since that point have evidence the previous run
+/// didn't see and warrant re-evaluation; memories not accessed since
+/// then have no new evidence and can be skipped.
+///
+/// Returns `Ok(None)` if no prior run has finished — first-ever REM, a
+/// fresh deploy where rem_runs is empty, or all previous runs crashed.
+/// The caller should treat `None` as "freshness gate disabled" so the
+/// first successful run evaluates everything.
+///
+/// Self-adjusting property: if REM didn't run for a week (worker
+/// outage, cron paused), this returns the timestamp of the run before
+/// the outage — so memories accessed during that week are all
+/// considered fresh on the recovery run.
+pub async fn previous_run_started_at(
+    db: &D1Database,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        started_at: String,
+    }
+
+    let row = db
+        .prepare(
+            "SELECT started_at FROM rem_runs
+             WHERE finished_at IS NOT NULL
+             ORDER BY started_at DESC
+             LIMIT 1",
+        )
+        .first::<Row>(None)
+        .await?;
+
+    Ok(row.and_then(|r| {
+        chrono::DateTime::parse_from_rfc3339(&r.started_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .ok()
+    }))
+}
+
 /// Update the rem_runs row with final stats once the run completes.
 /// Idempotent — if this is called twice with the same run_id the
 /// second call overwrites the first.

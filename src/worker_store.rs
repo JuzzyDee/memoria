@@ -879,3 +879,114 @@ pub async fn update_semantic_with_lineage(
 
     Ok(true)
 }
+
+// ──── Cluster decisions cache (CLA-94) ──────────────────────────────────
+
+/// A cached cluster decision — same UUID set produced this action last
+/// time REM judged it. Looked up by `cluster_hash` (SHA-256 of sorted
+/// member UUIDs, computed in `worker_rem::compute_cluster_hash`) to
+/// avoid re-invoking Haiku on stable clusters.
+#[derive(Debug, Clone)]
+pub struct ClusterDecision {
+    pub cluster_hash: String,
+    pub members_json: String,
+    pub last_action: String,
+    pub result_memory_id: Option<String>,
+    pub first_decided_at: DateTime<Utc>,
+    pub last_decided_at: DateTime<Utc>,
+    pub decision_count: u32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ClusterDecisionRow {
+    cluster_hash: String,
+    members_json: String,
+    last_action: String,
+    result_memory_id: Option<String>,
+    first_decided_at: String,
+    last_decided_at: String,
+    decision_count: u32,
+}
+
+impl ClusterDecisionRow {
+    fn into_decision(self) -> ClusterDecision {
+        let first_decided_at = DateTime::parse_from_rfc3339(&self.first_decided_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        let last_decided_at = DateTime::parse_from_rfc3339(&self.last_decided_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+        ClusterDecision {
+            cluster_hash: self.cluster_hash,
+            members_json: self.members_json,
+            last_action: self.last_action,
+            result_memory_id: self.result_memory_id,
+            first_decided_at,
+            last_decided_at,
+            decision_count: self.decision_count,
+        }
+    }
+}
+
+/// Fetch a cached decision for a cluster, or `None` if this cluster
+/// hasn't been judged before. Cache hit means REM can skip the Haiku
+/// call and reuse the prior decision.
+pub async fn fetch_cluster_decision(
+    db: &D1Database,
+    cluster_hash: &str,
+) -> Result<Option<ClusterDecision>> {
+    let row = db
+        .prepare(
+            "SELECT cluster_hash, members_json, last_action, result_memory_id,
+                    first_decided_at, last_decided_at, decision_count
+             FROM cluster_decisions
+             WHERE cluster_hash = ?",
+        )
+        .bind(&[cluster_hash.into()])?
+        .first::<ClusterDecisionRow>(None)
+        .await?;
+    Ok(row.map(ClusterDecisionRow::into_decision))
+}
+
+/// Record a cluster decision in the cache. On first insert, seeds
+/// `first_decided_at = last_decided_at = now()` and `decision_count = 1`.
+/// On conflict (cluster already cached), increments `decision_count` and
+/// refreshes `last_decided_at` / `last_action` / `result_memory_id`. The
+/// last-write-wins on action keeps the cache honest if a future Haiku
+/// version produces a different answer for the same member set (in which
+/// case the new judgment supersedes the old — we trust the more recent
+/// model run).
+pub async fn upsert_cluster_decision(
+    db: &D1Database,
+    cluster_hash: &str,
+    members_json: &str,
+    last_action: &str,
+    result_memory_id: Option<&str>,
+) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    db.prepare(
+        "INSERT INTO cluster_decisions
+         (cluster_hash, members_json, last_action, result_memory_id,
+          first_decided_at, last_decided_at, decision_count)
+         VALUES (?, ?, ?, ?, ?, ?, 1)
+         ON CONFLICT(cluster_hash) DO UPDATE SET
+           last_action = excluded.last_action,
+           result_memory_id = excluded.result_memory_id,
+           last_decided_at = excluded.last_decided_at,
+           decision_count = decision_count + 1",
+    )
+    .bind(&[
+        cluster_hash.into(),
+        members_json.into(),
+        last_action.into(),
+        match result_memory_id {
+            Some(r) => r.into(),
+            None => worker::wasm_bindgen::JsValue::NULL,
+        },
+        now.clone().into(),
+        now.into(),
+    ])?
+    .run()
+    .await?;
+    Ok(())
+}
