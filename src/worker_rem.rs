@@ -350,7 +350,7 @@ async fn process_cluster(
     // finished), the gate is disabled and every candidate proceeds to
     // tier 2 / Haiku. The first successful run evaluates everything.
     if let Some(cutoff) = prior_run_cutoff {
-        let any_fresh = memories.iter().any(|m| m.last_accessed >= cutoff);
+        let any_fresh = memories.iter().any(|m| m.last_accessed > cutoff);
         if !any_fresh {
             let rationale = format!(
                 "Freshness gate: no cluster member accessed since the previous \
