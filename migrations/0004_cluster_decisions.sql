@@ -8,8 +8,11 @@
 --
 -- This table caches each cluster's decision keyed by its members. Before
 -- calling Haiku, the consolidator checks for a cached decision; on cache
--- hit it bumps decision_count and dispatches the cached action without
--- a fresh API call.
+-- hit it records that the cluster was encountered (bumping decision_count
+-- + last_decided_at) and skips fresh model judgment. Cached non-skip
+-- results (create/append/revise) are NOT re-dispatched on cache hit —
+-- the original lineage entry + result_memory_id preserve the prior
+-- outcome, and re-dispatching would risk duplicate writes.
 --
 -- Cluster identity:
 --

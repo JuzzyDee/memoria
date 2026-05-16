@@ -150,6 +150,24 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
         }
     };
 
+    // CLA-94 dynamic freshness cutoff: the started_at of the most recent
+    // successfully finished REM run. Memories accessed since that point
+    // have new evidence the previous run didn't see; memories not
+    // accessed since then have no new evidence. Self-adjusts against
+    // actual REM cadence — no 24h literal assumption, and a long outage
+    // simply widens the eligibility window naturally.
+    //
+    // None = no finished prior run (first-ever, or all prior runs
+    // crashed). In that case process_cluster disables the freshness
+    // gate so the first successful run evaluates every candidate.
+    let prior_run_cutoff = match worker_rem_audit::previous_run_started_at(&db).await {
+        Ok(ts) => ts,
+        Err(e) => {
+            summary.errors.push(format!("prior_run lookup: {:?}", e));
+            None
+        }
+    };
+
     // 1. Apply Ebbinghaus decay across the non-orientation corpus.
     match worker_store::apply_decay(&db).await {
         Ok(n) => summary.decayed = n,
@@ -202,6 +220,7 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
             cluster_idx,
             cluster_ids,
             &pairs,
+            prior_run_cutoff,
             &mut summary,
         )
         .await
@@ -305,6 +324,7 @@ async fn process_cluster(
     cluster_idx: usize,
     cluster_ids: &[String],
     all_pairs: &[(String, String, u32)],
+    prior_run_cutoff: Option<chrono::DateTime<chrono::Utc>>,
     summary: &mut RunSummary,
 ) -> Result<()> {
     let id_refs: Vec<&str> = cluster_ids.iter().map(String::as_str).collect();
@@ -314,44 +334,57 @@ async fn process_cluster(
     }
 
     // CLA-94 tier 1 — freshness gate. If no cluster member has been
-    // accessed since the previous REM run, nothing has changed and the
-    // prior judgment still holds. Catches quiet clusters (rarely
-    // recalled) without ever touching the cluster_decisions table.
-    // 23h rather than 24h to give the cron and any clock drift some
-    // headroom — the cutoff is "since the previous nightly run."
-    let staleness_cutoff = chrono::Utc::now() - chrono::Duration::hours(23);
-    let any_fresh = memories.iter().any(|m| m.last_accessed >= staleness_cutoff);
-    if !any_fresh {
-        let rationale = format!(
-            "Freshness gate: no cluster member accessed in the last 23h \
-             (max last_accessed = {}). Nothing has changed since the previous \
-             REM run; prior judgment stands. (CLA-94 tier 1)",
-            memories
-                .iter()
-                .map(|m| m.last_accessed)
-                .max()
-                .map(|t| t.to_rfc3339())
-                .unwrap_or_else(|| "unknown".to_string())
-        );
-        if let Err(e) = worker_rem_audit::record_decision(
-            db,
-            run_id,
-            cluster_idx,
-            "stale",
-            "skip_via_staleness",
-            cluster_ids,
-            None,
-            None,
-            &rationale,
-        )
-        .await
-        {
-            summary
-                .errors
-                .push(format!("audit stale (cluster {}): {:?}", cluster_idx, e));
+    // accessed since the previous *finished* REM run, no new co-activation
+    // evidence has accumulated against this cluster, so inference is
+    // skipped. Catches quiet clusters (rarely recalled) without ever
+    // touching the cluster_decisions table.
+    //
+    // The cutoff is dynamic: prior_run_cutoff = started_at of the most
+    // recent finished rem_runs row. This self-adjusts against actual
+    // REM cadence — no 24h literal — and handles long outages cleanly:
+    // a recovery run after a week of downtime uses a week-old cutoff,
+    // so anything accessed during that week is correctly treated as
+    // fresh.
+    //
+    // If prior_run_cutoff is None (first-ever run, or no prior run has
+    // finished), the gate is disabled and every candidate proceeds to
+    // tier 2 / Haiku. The first successful run evaluates everything.
+    if let Some(cutoff) = prior_run_cutoff {
+        let any_fresh = memories.iter().any(|m| m.last_accessed >= cutoff);
+        if !any_fresh {
+            let rationale = format!(
+                "Freshness gate: no cluster member accessed since the previous \
+                 finished REM run (cutoff = {}; max last_accessed = {}). No new \
+                 co-activation evidence exists for this cluster, so inference \
+                 is skipped. (CLA-94 tier 1)",
+                cutoff.to_rfc3339(),
+                memories
+                    .iter()
+                    .map(|m| m.last_accessed)
+                    .max()
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".to_string())
+            );
+            if let Err(e) = worker_rem_audit::record_decision(
+                db,
+                run_id,
+                cluster_idx,
+                "stale",
+                "skip_via_staleness",
+                cluster_ids,
+                None,
+                None,
+                &rationale,
+            )
+            .await
+            {
+                summary
+                    .errors
+                    .push(format!("audit stale (cluster {}): {:?}", cluster_idx, e));
+            }
+            summary.decisions_skipped += 1;
+            return Ok(());
         }
-        summary.decisions_skipped += 1;
-        return Ok(());
     }
 
     // CLA-94 tier 2 — cluster identity cache. For clusters whose members
@@ -492,8 +525,13 @@ async fn process_cluster(
     } else {
         "multi".to_string()
     };
+    // Sorted to match the hash's sort invariant — same set always
+    // serialises the same way, so the row diff is stable and the
+    // members_json column can be eyeballed without mentally re-sorting.
+    let mut sorted_members: Vec<&str> = cluster_ids.iter().map(String::as_str).collect();
+    sorted_members.sort();
     let members_json =
-        serde_json::to_string(cluster_ids).unwrap_or_else(|_| "[]".to_string());
+        serde_json::to_string(&sorted_members).unwrap_or_else(|_| "[]".to_string());
     if let Err(e) = worker_store::upsert_cluster_decision(
         db,
         &cluster_hash,
