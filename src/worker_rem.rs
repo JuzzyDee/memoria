@@ -34,6 +34,7 @@ use crate::memory::{Memory, MemoryType};
 use crate::{worker_embed, worker_rem_audit, worker_store, worker_vectorize};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use worker::{D1Database, Env, Fetch, Headers, Method, Request, RequestInit, Result};
 
@@ -275,6 +276,26 @@ fn cluster_pairs(
     result
 }
 
+// ──── Cluster identity (cache key for the decisions cache) ─────────────
+
+/// Deterministic identity for a cluster: SHA-256 of its members' UUIDs,
+/// sorted lexicographically and joined with commas. Same UUID set →
+/// same hash regardless of input order. Forms the primary key of the
+/// `cluster_decisions` cache table (CLA-94): future REM runs over the
+/// same cluster look up the cached decision instead of re-invoking
+/// Haiku.
+///
+/// Cluster identity follows member set, not member content — a member
+/// being reframed doesn't invalidate the decision because the connection
+/// structure (which is what Haiku judges) hasn't changed.
+fn compute_cluster_hash(member_ids: &[String]) -> String {
+    let mut sorted: Vec<&str> = member_ids.iter().map(String::as_str).collect();
+    sorted.sort();
+    let joined = sorted.join(",");
+    let digest = Sha256::digest(joined.as_bytes());
+    format!("{:x}", digest)
+}
+
 // ──── Per-cluster processing ────────────────────────────────────────────
 
 async fn process_cluster(
@@ -289,6 +310,100 @@ async fn process_cluster(
     let id_refs: Vec<&str> = cluster_ids.iter().map(String::as_str).collect();
     let memories = worker_store::get_many(db, &id_refs).await?;
     if memories.is_empty() {
+        return Ok(());
+    }
+
+    // CLA-94 tier 1 — freshness gate. If no cluster member has been
+    // accessed since the previous REM run, nothing has changed and the
+    // prior judgment still holds. Catches quiet clusters (rarely
+    // recalled) without ever touching the cluster_decisions table.
+    // 23h rather than 24h to give the cron and any clock drift some
+    // headroom — the cutoff is "since the previous nightly run."
+    let staleness_cutoff = chrono::Utc::now() - chrono::Duration::hours(23);
+    let any_fresh = memories.iter().any(|m| m.last_accessed >= staleness_cutoff);
+    if !any_fresh {
+        let rationale = format!(
+            "Freshness gate: no cluster member accessed in the last 23h \
+             (max last_accessed = {}). Nothing has changed since the previous \
+             REM run; prior judgment stands. (CLA-94 tier 1)",
+            memories
+                .iter()
+                .map(|m| m.last_accessed)
+                .max()
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        if let Err(e) = worker_rem_audit::record_decision(
+            db,
+            run_id,
+            cluster_idx,
+            "stale",
+            "skip_via_staleness",
+            cluster_ids,
+            None,
+            None,
+            &rationale,
+        )
+        .await
+        {
+            summary
+                .errors
+                .push(format!("audit stale (cluster {}): {:?}", cluster_idx, e));
+        }
+        summary.decisions_skipped += 1;
+        return Ok(());
+    }
+
+    // CLA-94 tier 2 — cluster identity cache. For clusters whose members
+    // are recalled often (duck pond, rover follow, anything in active
+    // rotation), tier 1 won't help — last_accessed will always be fresh.
+    // But if the UUID set is the same as a prior run's, the judgment
+    // will land the same. Same hash → cached decision.
+    let cluster_hash = compute_cluster_hash(cluster_ids);
+    if let Some(cached) = worker_store::fetch_cluster_decision(db, &cluster_hash).await? {
+        // Bump count + last_decided_at; action and result are preserved
+        // from the original judgment.
+        if let Err(e) = worker_store::upsert_cluster_decision(
+            db,
+            &cluster_hash,
+            &cached.members_json,
+            &cached.last_action,
+            cached.result_memory_id.as_deref(),
+        )
+        .await
+        {
+            summary
+                .errors
+                .push(format!("cache touch (cluster {}): {:?}", cluster_idx, e));
+        }
+
+        // Audit the cache hit so the run summary still reflects that
+        // this cluster was encountered tonight, even though no Haiku
+        // call happened.
+        let rationale = format!(
+            "Cache hit: cluster judged {} previous time(s); last action was \"{}\". \
+             Skipping fresh Haiku call (CLA-94 cluster_decisions cache).",
+            cached.decision_count, cached.last_action
+        );
+        if let Err(e) = worker_rem_audit::record_decision(
+            db,
+            run_id,
+            cluster_idx,
+            "cached",
+            "skip_via_cache",
+            cluster_ids,
+            None,
+            cached.result_memory_id.as_deref(),
+            &rationale,
+        )
+        .await
+        {
+            summary
+                .errors
+                .push(format!("audit cached (cluster {}): {:?}", cluster_idx, e));
+        }
+
+        summary.decisions_skipped += 1;
         return Ok(());
     }
 
@@ -311,6 +426,12 @@ async fn process_cluster(
         }
     };
 
+    // Track the first non-None dispatch result so we can persist it as
+    // the cluster's representative result_memory_id in cluster_decisions.
+    // Multi-decision clusters cache only the first result; the full set
+    // is recoverable from rem_decisions via run_id + cluster_idx.
+    let mut first_result_id: Option<String> = None;
+
     for decision in &decisions {
         let dispatch_result = dispatch_decision(env, db, decision).await;
 
@@ -322,6 +443,11 @@ async fn process_cluster(
             Ok(Some(id)) => Some(id.as_str()),
             _ => None,
         };
+        if first_result_id.is_none() {
+            if let Some(id) = result_memory_id_str {
+                first_result_id = Some(id.to_string());
+            }
+        }
         if let Err(e) = worker_rem_audit::record_decision(
             db,
             run_id,
@@ -351,6 +477,35 @@ async fn process_cluster(
                 .errors
                 .push(format!("dispatch cluster {}: {:?}", cluster_idx, e)),
         }
+    }
+
+    // CLA-94 cluster decision cache — post-Haiku write. Cache the
+    // cluster's outcome so future REM runs over the same member set
+    // skip the API call. For single-decision clusters this captures the
+    // exact action; for multi-decision clusters we record "multi" and
+    // the first result_memory_id — the full decision set is recoverable
+    // from rem_decisions filtered by run_id + cluster_idx.
+    let cache_action: String = if decisions.len() == 1 {
+        decision_action_str(&decisions[0].action).to_string()
+    } else if decisions.is_empty() {
+        "noop".to_string()
+    } else {
+        "multi".to_string()
+    };
+    let members_json =
+        serde_json::to_string(cluster_ids).unwrap_or_else(|_| "[]".to_string());
+    if let Err(e) = worker_store::upsert_cluster_decision(
+        db,
+        &cluster_hash,
+        &members_json,
+        &cache_action,
+        first_result_id.as_deref(),
+    )
+    .await
+    {
+        summary
+            .errors
+            .push(format!("cache write (cluster {}): {:?}", cluster_idx, e));
     }
 
     Ok(())
