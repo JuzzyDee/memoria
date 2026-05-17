@@ -46,7 +46,7 @@ hex = "0.4"
 # Crypto for auth (argon2 hashing, HMAC token signing) — all pure-Rust,
 # wasm-compatible.
 argon2 = "0.5"
-rand = "0.9"
+rand = "0.10"
 hmac = "0.12"
 sha2 = "0.10"
 
