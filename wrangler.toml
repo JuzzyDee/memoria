@@ -99,16 +99,36 @@ id = "9458dc8b95fa40b0b7f1e162abb4f8b1"
 # new_classes = ["AuthCodesObject"]
 
 # ──────────────────────────────────────────────────────────────────────
-# Cron triggers — REM consolidator runs nightly (CLA-87). 14:00 UTC =
-# 00:00 AEST. Brisbane doesn't observe DST so this is year-round stable.
+# Cron triggers — two cognitive loops on different schedules:
+#
+#   0 14 * * *  (14:00 UTC / 00:00 AEST) — REM consolidator (CLA-87)
+#                Hebbian clustering + Haiku judgment + additive dispatch.
+#
+#   0  8 * * *  (08:00 UTC / 18:00 AEST) — Dialectic (CLA-95)
+#                Calibration scrutiny of recent semantic memories.
+#                Stage 1 is judgment-only; Stages 2/3 add adversarial
+#                dialogue and action dispatch respectively.
+#
+# Brisbane doesn't observe DST, so the UTC↔AEST offset is stable
+# year-round. Dispatch logic lives in lib.rs's scheduled handler,
+# matching on event.cron() to select which loop to run.
 # ──────────────────────────────────────────────────────────────────────
 [triggers]
-crons = ["0 14 * * *"]
+crons = ["0 14 * * *", "0 8 * * *"]
 
 # ──────────────────────────────────────────────────────────────────────
 # Secrets (set via `wrangler secret put`, not committed):
-#   MEMORIA_API_KEYS    — semicolon-separated rover:<argon2-hash> entries
-#                         (CLA-86 service-key list)
-#   ANTHROPIC_API_KEY   — used by the REM consolidator to call Haiku 4.5
-#                         for the consolidation judgment (CLA-87)
+#   MEMORIA_API_KEYS              — semicolon-separated rover:<argon2-hash>
+#                                   entries (CLA-86 service-key list)
+#   CLAUDE_CODE_OAUTH_TOKEN       — long-lived OAuth token from
+#                                   `claude setup-token`. Used by REM
+#                                   (CLA-87) and Dialectic (CLA-95) to
+#                                   call Haiku 4.5 via Anthropic API
+#                                   on the subscription credit pool.
+#   MEMORIA_OAUTH_CLIENT_ID       — OAuth 2.1 client identifier.
+#   MEMORIA_OAUTH_CLIENT_SECRET   — OAuth 2.1 client secret.
+#   MEMORIA_OAUTH_REDIRECT_URIS   — optional; semicolon-separated
+#                                   allowlist for OAuth redirect URIs
+#                                   (CLA-91 Fix 2).
+#   MEMORIA_ADMIN_KEY             — admin import endpoint auth.
 # ──────────────────────────────────────────────────────────────────────

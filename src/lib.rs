@@ -20,6 +20,8 @@ mod memory;
 mod worker_admin;
 mod worker_audit;
 mod worker_auth_ctx;
+mod worker_dialectic;
+mod worker_dialectic_audit;
 mod worker_embed;
 mod worker_mcp;
 mod worker_mmr;
@@ -135,12 +137,35 @@ async fn handle_token_form(env: &Env, req: &mut Request) -> Result<Response> {
     worker_oauth::handle_token_post(env, form).await
 }
 
-/// REM consolidator — runs nightly per the cron trigger in wrangler.toml.
-/// Apply decay → find candidate pairs → cluster → consolidate via Haiku
-/// → dispatch additive operations. See worker_rem.rs for the metabolism.
+/// Scheduled handler — dispatched by cron triggers declared in
+/// wrangler.toml. We use the cron pattern that fired (via `event.cron()`)
+/// to decide which cognitive loop to invoke:
+///
+///   - `0 14 * * *` (14:00 UTC / 00:00 AEST) → REM consolidator
+///   - `0 8 * * *`  (08:00 UTC / 18:00 AEST) → Dialectic (CLA-95)
+///
+/// Unknown cron patterns are deliberately not dispatched — they log an
+/// error and no-op. Per CLA-95 PR #7 review: silent-and-mostly-fine
+/// (fall through to REM) is worse than visible-and-wrong (log + no-op)
+/// when a typo'd cron entry hits production. Adding a new cron requires
+/// adding a match arm here.
 #[event(scheduled)]
-pub async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    match worker_rem::run(&env).await {
+pub async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    let cron = event.cron();
+    match cron.as_str() {
+        "0 8 * * *" => run_dialectic(&env).await,
+        "0 14 * * *" => run_rem(&env).await,
+        other => {
+            worker::console_error!(
+                "Unknown cron trigger: {} — no handler dispatched",
+                other
+            );
+        }
+    }
+}
+
+async fn run_rem(env: &Env) {
+    match worker_rem::run(env).await {
         Ok(summary) => {
             worker::console_log!(
                 "REM run complete: decayed={} clusters={} created={} appended={} revised={} skipped={} errors={}",
@@ -158,6 +183,25 @@ pub async fn scheduled(_event: ScheduledEvent, env: Env, _ctx: ScheduleContext) 
         }
         Err(e) => {
             worker::console_error!("REM run failed catastrophically: {:?}", e);
+        }
+    }
+}
+
+async fn run_dialectic(env: &Env) {
+    match worker_dialectic::run(env).await {
+        Ok(summary) => {
+            worker::console_log!(
+                "Dialectic run complete: candidates={} decisions={} errors={}",
+                summary.candidates_reviewed,
+                summary.decisions_count,
+                summary.errors.len()
+            );
+            for err in &summary.errors {
+                worker::console_error!("Dialectic partial error: {}", err);
+            }
+        }
+        Err(e) => {
+            worker::console_error!("Dialectic run failed catastrophically: {:?}", e);
         }
     }
 }
