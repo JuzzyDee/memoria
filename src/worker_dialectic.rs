@@ -112,15 +112,19 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
     let db = env.d1("DB")?;
     let mut summary = RunSummary::default();
 
+    // Fail closed on audit start. Unlike REM — whose cognitive work
+    // (decay + consolidation) has standalone value even when audit is
+    // degraded — Stage 1 dialectic's only product IS the audit row.
+    // If we can't open the run, continuing burns Haiku calls and
+    // potentially writes orphan decision rows (FK refs to a run_id
+    // that doesn't exist). Better to log the error in the summary and
+    // return — the scheduled handler will log it, and the next cron
+    // tick will retry. Per CLA-95 PR #7 review.
     let run_id = match worker_dialectic_audit::record_run_start(&db).await {
         Ok(id) => id,
         Err(e) => {
-            // Same pattern as worker_rem: audit failure doesn't abort
-            // the cognitive work, just degrades the trail. Synthesize
-            // an id so decision writes still group, even if their FK
-            // refs an orphaned run_id.
             summary.errors.push(format!("audit start: {:?}", e));
-            uuid::Uuid::new_v4().to_string()
+            return Ok(summary);
         }
     };
 

@@ -144,15 +144,23 @@ async fn handle_token_form(env: &Env, req: &mut Request) -> Result<Response> {
 ///   - `0 14 * * *` (14:00 UTC / 00:00 AEST) → REM consolidator
 ///   - `0 8 * * *`  (08:00 UTC / 18:00 AEST) → Dialectic (CLA-95)
 ///
-/// An unknown cron pattern falls through to REM as a safe default —
-/// REM is idempotent and write-conservative, so firing it on a
-/// misconfigured cron costs at most a wasted Haiku call.
+/// Unknown cron patterns are deliberately not dispatched — they log an
+/// error and no-op. Per CLA-95 PR #7 review: silent-and-mostly-fine
+/// (fall through to REM) is worse than visible-and-wrong (log + no-op)
+/// when a typo'd cron entry hits production. Adding a new cron requires
+/// adding a match arm here.
 #[event(scheduled)]
 pub async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     let cron = event.cron();
     match cron.as_str() {
         "0 8 * * *" => run_dialectic(&env).await,
-        _ => run_rem(&env).await,
+        "0 14 * * *" => run_rem(&env).await,
+        other => {
+            worker::console_error!(
+                "Unknown cron trigger: {} — no handler dispatched",
+                other
+            );
+        }
     }
 }
 
