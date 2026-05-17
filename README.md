@@ -119,101 +119,62 @@ The immune system doesn't just detect problems. It acts — reframing, forgettin
 
 This is a **deploy-your-own** setup. There's no hosted instance.
 
-### Prerequisites
-
-- [Cloudflare account](https://cloudflare.com) — free tier handles typical single-user volume; upgrade only if you hit Workers AI or D1 limits
-- [Claude Pro, Max, Team, or Enterprise subscription](https://claude.com/pricing) — the REM consolidator authenticates via a long-lived OAuth token from your subscription, drawing from your Extra Usage credit pool
-- [Claude Code](https://claude.com/claude-code) — needed once to generate the long-lived OAuth token via `claude setup-token`
-- [Rust toolchain](https://rustup.rs/) with the `wasm32-unknown-unknown` target
-- [`wrangler`](https://developers.cloudflare.com/workers/wrangler/install-and-update/)
-
-### Clone and authenticate
-
 ```bash
 git clone https://github.com/JuzzyDee/memoria.git
 cd memoria
-rustup target add wasm32-unknown-unknown
-wrangler login
+./scripts/setup.sh
 ```
 
-### Create the Cloudflare resources
+That's the deploy. The script walks you through Cloudflare resource creation, credential generation, timezone-aware cron configuration, secret push, schema migration, and worker deploy — about one hour end-to-end, mostly waiting on wrangler. Run with `--dry-run` first if you want to see what it will do without touching your account.
+
+### What you'll need first
+
+- [Cloudflare account](https://cloudflare.com) — free tier handles typical single-user volume; upgrade only if you hit Workers AI or D1 limits
+- [Claude Pro, Max, Team, or Enterprise subscription](https://claude.com/pricing) — Memoria's cognitive loops draw on Haiku 4.5 via your subscription credit pool
+- [Claude Code](https://claude.com/claude-code) — used once to generate the long-lived OAuth token (the script tells you when)
+- [`wrangler`](https://developers.cloudflare.com/workers/wrangler/install-and-update/) — `npm install -g wrangler`
+- [Rust toolchain](https://rustup.rs/) with the `wasm32-unknown-unknown` target — the script will add the target for you if rustup is installed
+- `openssl` (preinstalled on macOS and most Linux distros)
+
+### What the script asks
+
+1. **Confirmation** that you've saved the generated OAuth client_id, client_secret, and admin key (displayed once, regeneratable by re-running the script)
+2. **Your timezone** (IANA name; common ones offered as a numbered menu)
+3. **Local times** for the REM consolidator (default 00:00) and the dialectic (default 18:00) — the script converts to UTC and writes the cron triggers
+4. **Your long-lived OAuth token** from `claude setup-token` — run that in another terminal, paste the result back
+
+Everything else happens without prompts.
+
+### After the script finishes
+
+The script prints your worker URL and the OAuth credentials you'll need for Claude.ai. To connect:
+
+**Claude.ai → Settings → Connectors → Add Custom Connector**
+- URL: `https://<your-worker-url>/mcp`
+- Client ID: from the script output
+- Client Secret: from the script output
+
+On first connect from a non-Desktop client, you may see `invalid_request: redirect_uri not registered`. Copy the URI from the 400 response and add it to the allowlist:
 
 ```bash
-wrangler d1 create memoria-db
-# paste returned database_id into wrangler.toml under [[d1_databases]]
-
-wrangler vectorize create memoria-vectors --dimensions=768 --metric=cosine
-
-wrangler kv namespace create MEMORIA_TOKENS
-# paste returned id into wrangler.toml under [[kv_namespaces]]
-
-wrangler r2 bucket create memoria-images
+wrangler secret put MEMORIA_OAUTH_REDIRECT_URIS
+# enter: claude://oauth-callback;<the URI from the error>
 ```
 
-### Generate the long-lived OAuth token
+For embedded systems with no UI, use a service API key as a plain `Authorization: Bearer <key>` instead. Push the allowlist via `wrangler secret put MEMORIA_API_KEYS`.
 
-The REM consolidator (and any future Worker-side Haiku traffic) authenticates against Anthropic via a long-lived OAuth token tied to your Claude subscription. Generate it once with Claude Code:
+### Verifying Memoria is running
 
 ```bash
-claude setup-token       # interactive browser auth, one-time
-# copy the printed token — it's a ~1-year OAuth token (prefix sk-ant-oat01-)
-# bound to your subscription. Spend draws from your Extra Usage credit pool.
+wrangler d1 execute memoria-db --remote \
+  --command "SELECT * FROM rem_runs ORDER BY started_at DESC LIMIT 5"
 ```
 
-Re-run any time it expires or you want to rotate. Revoke old tokens at [claude.ai/settings/claude-code](https://claude.ai/settings/claude-code) — note that `claude logout` does **not** revoke server-side.
+After the first nightly cron fires (whichever time you chose), this should show one row with `finished_at` populated and `decisions_*` columns set. Same pattern works for `dialectic_runs`.
 
-### Set secrets
+### Manual deploy (no script)
 
-```bash
-# Required
-wrangler secret put CLAUDE_CODE_OAUTH_TOKEN        # paste the token from `claude setup-token`
-wrangler secret put MEMORIA_OAUTH_CLIENT_ID        # generate yourself, e.g. openssl rand -hex 16
-wrangler secret put MEMORIA_OAUTH_CLIENT_SECRET    # generate yourself, e.g. openssl rand -hex 32
-
-# Optional — for embedded systems authenticating via plain Bearer
-wrangler secret put MEMORIA_API_KEYS               # semicolon-separated role:argon2-hash pairs
-
-# Optional — redirect_uri allowlist for the OAuth consent flow.
-# Defaults to `claude://oauth-callback` (Claude Desktop). If you're
-# connecting from Claude.ai web, mobile, or any other MCP client, you
-# must add its callback URI here or the consent flow will return
-# `invalid_request: redirect_uri not registered`.
-#
-# Find a client's actual callback URI by attempting to connect and
-# checking the 400 response body, or by tailing the worker:
-#   wrangler tail memoria
-#
-# Format: semicolon-separated, exact-match.
-wrangler secret put MEMORIA_OAUTH_REDIRECT_URIS    # e.g. claude://oauth-callback;https://claude.ai/oauth/callback
-```
-
-### Apply schema and deploy
-
-```bash
-wrangler d1 migrations apply memoria-db --remote
-wrangler deploy
-```
-
-Wrangler prints the public URL of your Worker on successful deploy.
-
-### Connect a client
-
-In Claude.ai → Settings → Connectors → Add:
-- **URL**: `https://<your-worker-url>/mcp`
-- **Client ID**: the `MEMORIA_OAUTH_CLIENT_ID` you generated
-- **Client Secret**: the `MEMORIA_OAUTH_CLIENT_SECRET` you generated
-
-For embedded systems with no UI, use a service API key as a plain `Authorization: Bearer <key>` instead.
-
-### (Optional) Set up the dialectic locally
-
-If you want the full circadian — adversarial self-correction in addition to nightly consolidation — you'll need [Claude Code](https://claude.com/claude-code) on a machine that stays on.
-
-```bash
-# Schedule scripts/dialectic.sh via launchd (macOS) or cron (Linux), 18:00 daily.
-# The reference launchd plist on the project's own deploy invokes:
-#   /path/to/memoria/scripts/dialectic.sh --sonnet --verbose
-```
+If you'd rather understand or customise each step, the `wrangler.toml.example` file documents the structure and the original [pre-script Quick Start lives in the git history at PR #6](https://github.com/JuzzyDee/memoria/pull/6). The steps the script automates: `wrangler d1 create memoria-db`, `wrangler vectorize create memoria-vectors --dimensions=768 --metric=cosine`, `wrangler kv namespace create MEMORIA_TOKENS`, `wrangler r2 bucket create memoria-images`, paste IDs into wrangler.toml, generate OAuth credentials, `wrangler secret put` four secrets, `wrangler d1 migrations apply memoria-db --remote`, `wrangler deploy`.
 
 ## MCP Tools
 
