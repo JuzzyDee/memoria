@@ -343,6 +343,30 @@ pub async fn recall_by_entity(
     Ok(rows.into_iter().map(MemoryRow::into_memory).collect())
 }
 
+/// N most recently created semantic memories. Used by the dialectic
+/// (CLA-95) as its Stage 1 candidate selection — most-recent semantics
+/// are the freshest candidates for scrutiny and the highest-leverage
+/// place to catch inflation before it consolidates into the system's
+/// stable understanding. Stage 3 will replace this with a richer
+/// selection (skip recently-reviewed, weight by access count, etc.).
+pub async fn recent_semantics(db: &D1Database, limit: usize) -> Result<Vec<Memory>> {
+    let rows: Vec<MemoryRow> = db
+        .prepare(
+            "SELECT id, memory_type, content, summary, created_at, last_accessed,
+                    access_count, strength, stability, entity, tags, image_hash,
+                    image_mime, recorded_by
+             FROM memories
+             WHERE memory_type = 'semantic'
+             ORDER BY created_at DESC
+             LIMIT ?",
+        )
+        .bind(&[(limit as u32).into()])?
+        .all()
+        .await?
+        .results()?;
+    Ok(rows.into_iter().map(MemoryRow::into_memory).collect())
+}
+
 /// Resolve an 8-char prefix (as shown in recall output) to a full UUID.
 /// Returns `Ok(None)` if no match or if the prefix is ambiguous.
 pub async fn find_by_prefix(db: &D1Database, prefix: &str) -> Result<Option<Memory>> {
