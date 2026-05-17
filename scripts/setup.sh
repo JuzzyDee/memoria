@@ -1,0 +1,566 @@
+#!/usr/bin/env bash
+# scripts/setup.sh — one-command deploy for memoria (CLA-96).
+#
+# Walks a new operator from `git clone` to a working Cloudflare Worker
+# in one script. Creates D1 / Vectorize / KV / R2, generates OAuth
+# credentials, prompts for the long-lived Claude Code OAuth token,
+# configures cron triggers for the user's timezone, pushes secrets,
+# applies migrations, deploys.
+#
+# Designed for the audience already familiar with Claude but not
+# necessarily with Cloudflare. Assumes wrangler is installed and the
+# user has run `wrangler login` (script will prompt if not).
+#
+# Usage:
+#   ./scripts/setup.sh                # interactive deploy
+#   ./scripts/setup.sh --dry-run      # print actions without executing
+#   NO_COLOR=1 ./scripts/setup.sh     # disable colored output
+
+set -e
+set -u
+set -o pipefail
+
+# ──── Setup ──────────────────────────────────────────────────────────
+
+if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ]; then
+    RED='' GREEN='' YELLOW='' BLUE='' BOLD='' DIM='' RESET=''
+else
+    RED=$'\033[31m'
+    GREEN=$'\033[32m'
+    YELLOW=$'\033[33m'
+    BLUE=$'\033[34m'
+    BOLD=$'\033[1m'
+    DIM=$'\033[2m'
+    RESET=$'\033[0m'
+fi
+
+DRY_RUN=false
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run|-n)
+            DRY_RUN=true
+            ;;
+        --help|-h)
+            sed -n '1,/^set -e/p' "$0" | sed 's/^# \?//;1d;$d'
+            exit 0
+            ;;
+    esac
+done
+
+# ──── Helpers ────────────────────────────────────────────────────────
+
+say()     { printf '%s\n' "$*"; }
+header()  { printf '\n%s%s%s\n' "${BOLD}${BLUE}" "$*" "${RESET}"; }
+ok()      { printf '  %s✓%s %s\n' "${GREEN}" "${RESET}" "$*"; }
+warn()    { printf '  %s⚠%s  %s\n' "${YELLOW}" "${RESET}" "$*"; }
+err()     { printf '  %s✗%s %s\n' "${RED}" "${RESET}" "$*" >&2; }
+dim()     { printf '  %s%s%s\n' "${DIM}" "$*" "${RESET}"; }
+
+# Run a command; in dry-run, print instead.
+run() {
+    if [ "$DRY_RUN" = true ]; then
+        printf '  %s[dry-run]%s %s\n' "${YELLOW}" "${RESET}" "$*"
+        return 0
+    fi
+    "$@"
+}
+
+# Prompt for input with optional default. Reads into the named variable.
+prompt() {
+    local var_name="$1"
+    local prompt_text="$2"
+    local default="${3:-}"
+    local input
+    if [ -n "$default" ]; then
+        printf '  %s [%s]: ' "$prompt_text" "$default"
+    else
+        printf '  %s: ' "$prompt_text"
+    fi
+    read -r input
+    if [ -z "$input" ] && [ -n "$default" ]; then
+        input="$default"
+    fi
+    printf -v "$var_name" '%s' "$input"
+}
+
+# Prompt for secret input (no echo).
+prompt_secret() {
+    local var_name="$1"
+    local prompt_text="$2"
+    local input
+    printf '  %s: ' "$prompt_text"
+    read -rs input
+    printf '\n'
+    printf -v "$var_name" '%s' "$input"
+}
+
+# Detect GNU vs BSD date. macOS's BSD date returns the current date
+# (exit 0) for `date --version`, so we can't use exit code — we have
+# to check the output content. GNU coreutils' date prints "GNU coreutils"
+# on first line.
+_is_gnu_date() {
+    date --version 2>&1 | head -1 | grep -qi 'GNU coreutils'
+}
+
+# Cross-platform date arithmetic for "6 months from now in $TZ".
+date_plus_six_months_offset() {
+    local tz="$1"
+    if _is_gnu_date; then
+        TZ="$tz" date -d '+6 months' +%z
+    else
+        TZ="$tz" date -v+6m +%z
+    fi
+}
+
+# Convert local HH:MM in given timezone to UTC HH:MM.
+# Both platforms go via epoch — input is parsed in $tz, then re-emitted
+# as UTC. BSD's `date -j -f ... -u +%H:%M` ignores the -u flag in
+# practice, so we explicitly route through epoch instead.
+local_to_utc() {
+    local tz="$1"
+    local hhmm="$2"
+    local today epoch
+    today=$(date +%Y-%m-%d)
+    if _is_gnu_date; then
+        epoch=$(TZ="$tz" date -d "$today $hhmm" +%s)
+        date -u -d "@$epoch" +%H:%M
+    else
+        epoch=$(TZ="$tz" date -j -f "%Y-%m-%d %H:%M" "$today $hhmm" +%s)
+        date -u -r "$epoch" +%H:%M
+    fi
+}
+
+# Update a single value in wrangler.toml. Uses awk for context-aware edits.
+# Args: <binding-marker> <key-name> <new-value>
+# Finds lines like `<key-name> = "..."` AFTER seeing `<binding-marker>` and replaces.
+toml_set_after_marker() {
+    local marker="$1"
+    local key="$2"
+    local value="$3"
+    if [ "$DRY_RUN" = true ]; then
+        printf '  %s[dry-run]%s would set %s = "%s" after marker %s\n' \
+            "${YELLOW}" "${RESET}" "$key" "$value" "$marker"
+        return 0
+    fi
+    awk -v marker="$marker" -v key="$key" -v val="$value" '
+        $0 ~ marker { found=1 }
+        found && $0 ~ ("^" key " = ") {
+            printf "%s = \"%s\"\n", key, val
+            found=0
+            next
+        }
+        { print }
+    ' wrangler.toml > wrangler.toml.tmp && mv wrangler.toml.tmp wrangler.toml
+}
+
+# Replace the crons line.
+toml_set_crons() {
+    local rem_cron="$1"
+    local dialectic_cron="$2"
+    if [ "$DRY_RUN" = true ]; then
+        printf '  %s[dry-run]%s would set crons = ["%s", "%s"]\n' \
+            "${YELLOW}" "${RESET}" "$rem_cron" "$dialectic_cron"
+        return 0
+    fi
+    awk -v rem="$rem_cron" -v dia="$dialectic_cron" '
+        /^crons = / {
+            printf "crons = [\"%s\", \"%s\"]\n", rem, dia
+            next
+        }
+        { print }
+    ' wrangler.toml > wrangler.toml.tmp && mv wrangler.toml.tmp wrangler.toml
+}
+
+# ──── Banner ─────────────────────────────────────────────────────────
+
+cat <<EOF
+
+${BOLD}============================================================
+  Memoria Setup
+  A cognitive memory system for model continuity
+============================================================${RESET}
+EOF
+
+if [ "$DRY_RUN" = true ]; then
+    printf '\n%s%sDRY-RUN MODE%s — no Cloudflare resources will be created,\n' \
+        "${BOLD}" "${YELLOW}" "${RESET}"
+    printf '             no secrets will be pushed, no deploy will happen.\n'
+fi
+
+# ──── Step 1: Preflight ──────────────────────────────────────────────
+
+header "[1/8] Preflight checks"
+
+if [ ! -f Cargo.toml ]; then
+    err "Run this from the repo root (where Cargo.toml lives)."
+    exit 1
+fi
+ok "Repo root detected"
+
+# Create wrangler.toml from the template on a fresh clone. The template
+# is the canonical committed file; wrangler.toml itself is per-deploy
+# and gitignored (CLA-97 PR 1). This means the script bootstraps cleanly
+# from a fresh `git clone` with no prior state.
+if [ ! -f wrangler.toml ]; then
+    if [ -f wrangler.toml.example ]; then
+        if [ "$DRY_RUN" = true ]; then
+            dim "[dry-run] would: cp wrangler.toml.example wrangler.toml"
+        else
+            cp wrangler.toml.example wrangler.toml
+        fi
+        ok "Created wrangler.toml from wrangler.toml.example"
+    else
+        err "Missing both wrangler.toml and wrangler.toml.example."
+        exit 1
+    fi
+else
+    ok "wrangler.toml present (using existing)"
+fi
+
+if ! command -v wrangler >/dev/null 2>&1; then
+    err "wrangler not installed."
+    say "  Install: npm install -g wrangler"
+    say "  Docs:    https://developers.cloudflare.com/workers/wrangler/install-and-update/"
+    exit 1
+fi
+ok "wrangler installed ($(wrangler --version 2>&1 | head -1))"
+
+if ! wrangler whoami >/dev/null 2>&1; then
+    warn "Not logged into wrangler. Launching browser login..."
+    run wrangler login
+fi
+ok "Logged into Cloudflare"
+
+if ! command -v rustup >/dev/null 2>&1; then
+    err "rustup not installed."
+    say "  Install: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    exit 1
+fi
+if ! rustup target list --installed 2>/dev/null | grep -q '^wasm32-unknown-unknown$'; then
+    warn "wasm32-unknown-unknown target not installed. Adding..."
+    run rustup target add wasm32-unknown-unknown
+fi
+ok "rustup + wasm32-unknown-unknown target available"
+
+if ! command -v openssl >/dev/null 2>&1; then
+    err "openssl not found. Install via your package manager (brew install openssl on macOS)."
+    exit 1
+fi
+ok "openssl available"
+
+if ! command -v claude >/dev/null 2>&1; then
+    warn "Claude Code not in PATH — you'll need it for Step 5 (long-lived OAuth token)."
+else
+    ok "Claude Code detected"
+fi
+
+# ──── Step 2: Create Cloudflare resources ────────────────────────────
+
+header "[2/8] Creating Cloudflare resources"
+
+# D1
+say "  Creating D1 database 'memoria-db'..."
+if [ "$DRY_RUN" = true ]; then
+    D1_ID="dryrun-d1-0000-0000-0000-000000000000"
+    dim "[dry-run] wrangler d1 create memoria-db"
+else
+    if D1_OUTPUT=$(wrangler d1 create memoria-db 2>&1); then
+        D1_ID=$(printf '%s' "$D1_OUTPUT" | grep -oE 'database_id = "[a-f0-9-]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
+    else
+        # Likely already exists; pull current value from wrangler.toml
+        D1_ID=$(awk '/database_name = "memoria-db"/{found=1} found && /database_id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
+        warn "D1 'memoria-db' may already exist. Using existing id from wrangler.toml: ${D1_ID}"
+    fi
+    if [ -z "${D1_ID}" ]; then
+        err "Couldn't determine D1 database_id."
+        exit 1
+    fi
+fi
+ok "D1 database: memoria-db (id: ${D1_ID})"
+
+# Vectorize
+say "  Creating Vectorize index 'memoria-vectors'..."
+if [ "$DRY_RUN" = true ]; then
+    dim "[dry-run] wrangler vectorize create memoria-vectors --dimensions=768 --metric=cosine"
+else
+    # Capture stderr and stdout so we can decide whether the failure was
+    # an "already exists" we tolerate, or something we should surface.
+    if VECTORIZE_OUT=$(wrangler vectorize create memoria-vectors --dimensions=768 --metric=cosine 2>&1); then
+        printf '%s\n' "$VECTORIZE_OUT" | tail -3
+    else
+        warn "Vectorize create returned non-zero (likely already exists):"
+        printf '%s\n' "$VECTORIZE_OUT" | tail -3 | sed 's/^/    /'
+    fi
+fi
+ok "Vectorize index: memoria-vectors"
+
+# KV
+say "  Creating KV namespace 'MEMORIA_TOKENS'..."
+if [ "$DRY_RUN" = true ]; then
+    KV_ID="dryrunkv00000000000000000000000000"
+    dim "[dry-run] wrangler kv namespace create MEMORIA_TOKENS"
+else
+    if KV_OUTPUT=$(wrangler kv namespace create MEMORIA_TOKENS 2>&1); then
+        KV_ID=$(printf '%s' "$KV_OUTPUT" | grep -oE 'id = "[a-f0-9]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
+    else
+        KV_ID=$(awk '/binding = "TOKENS"/{found=1} found && /^id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
+        warn "KV 'MEMORIA_TOKENS' may already exist. Using existing id from wrangler.toml: ${KV_ID}"
+    fi
+    if [ -z "${KV_ID}" ]; then
+        err "Couldn't determine KV id."
+        exit 1
+    fi
+fi
+ok "KV namespace: MEMORIA_TOKENS (id: ${KV_ID})"
+
+# R2
+say "  Creating R2 bucket 'memoria-images'..."
+if [ "$DRY_RUN" = true ]; then
+    dim "[dry-run] wrangler r2 bucket create memoria-images"
+else
+    if R2_OUT=$(wrangler r2 bucket create memoria-images 2>&1); then
+        printf '%s\n' "$R2_OUT" | tail -3
+    else
+        warn "R2 bucket create returned non-zero (likely already exists):"
+        printf '%s\n' "$R2_OUT" | tail -3 | sed 's/^/    /'
+    fi
+fi
+ok "R2 bucket: memoria-images"
+
+# Patch wrangler.toml with the new IDs.
+if [ "$DRY_RUN" = true ]; then
+    dim "[dry-run] would back up wrangler.toml and patch D1 + KV ids"
+else
+    cp wrangler.toml wrangler.toml.bak
+fi
+toml_set_after_marker 'database_name = "memoria-db"' 'database_id' "$D1_ID"
+toml_set_after_marker 'binding = "TOKENS"' 'id' "$KV_ID"
+[ "$DRY_RUN" != true ] && ok "wrangler.toml patched (backup at wrangler.toml.bak)"
+
+# ──── Step 3: Timezone + cron ────────────────────────────────────────
+
+header "[3/8] Configuring schedule"
+
+say "  Memoria runs two cognitive loops on cron triggers:"
+dim "    REM consolidator — clusters and synthesizes memories"
+dim "    Dialectic         — adversarially scrutinises memory calibration"
+say ""
+say "  Common timezones:"
+say "    1) Australia/Brisbane     (AEST, no DST)"
+say "    2) Australia/Sydney       (AEST/AEDT)"
+say "    3) America/Los_Angeles    (PST/PDT)"
+say "    4) America/New_York       (EST/EDT)"
+say "    5) Europe/London          (GMT/BST)"
+say "    6) Europe/Berlin          (CET/CEST)"
+say "    7) Asia/Tokyo             (JST, no DST)"
+say "    8) Other (enter IANA name)"
+prompt TZ_CHOICE "Choose timezone (number or IANA name)" "1"
+
+case "$TZ_CHOICE" in
+    1) TZ_NAME="Australia/Brisbane" ;;
+    2) TZ_NAME="Australia/Sydney" ;;
+    3) TZ_NAME="America/Los_Angeles" ;;
+    4) TZ_NAME="America/New_York" ;;
+    5) TZ_NAME="Europe/London" ;;
+    6) TZ_NAME="Europe/Berlin" ;;
+    7) TZ_NAME="Asia/Tokyo" ;;
+    8) prompt TZ_NAME "Enter IANA timezone name (e.g., Pacific/Auckland)" ;;
+    *) TZ_NAME="$TZ_CHOICE" ;;
+esac
+
+if ! TZ="$TZ_NAME" date >/dev/null 2>&1; then
+    err "Unknown timezone: ${TZ_NAME}"
+    exit 1
+fi
+ok "Timezone: ${TZ_NAME}"
+
+validate_hhmm() {
+    local val="$1"
+    case "$val" in
+        [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+while true; do
+    prompt REM_LOCAL "REM run time (HH:MM local, default 00:00)" "00:00"
+    if validate_hhmm "$REM_LOCAL"; then
+        break
+    fi
+    warn "Invalid time. Use HH:MM in 24-hour form, e.g. 00:00 or 18:30."
+done
+
+while true; do
+    prompt DIALECTIC_LOCAL "Dialectic run time (HH:MM local, default 18:00)" "18:00"
+    if validate_hhmm "$DIALECTIC_LOCAL"; then
+        break
+    fi
+    warn "Invalid time. Use HH:MM in 24-hour form, e.g. 00:00 or 18:30."
+done
+
+REM_UTC=$(local_to_utc "$TZ_NAME" "$REM_LOCAL")
+DIALECTIC_UTC=$(local_to_utc "$TZ_NAME" "$DIALECTIC_LOCAL")
+
+# Strip leading zeros so cron sees "8" not "08" (cron expressions
+# don't allow zero-padded numbers in some implementations).
+# 10# prefix forces base-10 in bash arithmetic, which is the only
+# place that syntax is understood — printf '%d' doesn't honor it.
+REM_H=$((10#${REM_UTC%:*}))
+REM_M=$((10#${REM_UTC#*:}))
+DIA_H=$((10#${DIALECTIC_UTC%:*}))
+DIA_M=$((10#${DIALECTIC_UTC#*:}))
+
+REM_CRON="${REM_M} ${REM_H} * * *"
+DIALECTIC_CRON="${DIA_M} ${DIA_H} * * *"
+
+toml_set_crons "$REM_CRON" "$DIALECTIC_CRON"
+ok "REM: ${REM_LOCAL} ${TZ_NAME} = ${REM_UTC} UTC (cron: ${REM_CRON})"
+ok "Dialectic: ${DIALECTIC_LOCAL} ${TZ_NAME} = ${DIALECTIC_UTC} UTC (cron: ${DIALECTIC_CRON})"
+
+NOW_OFFSET=$(TZ="$TZ_NAME" date +%z)
+if SIXMO_OFFSET=$(date_plus_six_months_offset "$TZ_NAME" 2>/dev/null) \
+    && [ -n "$SIXMO_OFFSET" ] && [ "$NOW_OFFSET" != "$SIXMO_OFFSET" ]; then
+    warn "Timezone ${TZ_NAME} observes DST. Your schedule will shift by an hour seasonally."
+    dim "Re-run setup.sh at the DST boundary to fix, or accept the drift."
+fi
+
+# ──── Step 4: Generate credentials ───────────────────────────────────
+
+header "[4/8] Generating credentials"
+
+CLIENT_ID="memoria-$(openssl rand -hex 4)"
+CLIENT_SECRET=$(openssl rand -hex 32)
+ADMIN_KEY=$(openssl rand -hex 32)
+
+cat <<EOF
+
+  ${BOLD}${YELLOW}⚠  SAVE THESE NOW — only displayed once.${RESET}
+  ${YELLOW}If lost, re-run ./scripts/setup.sh to regenerate.${RESET}
+
+  ${BOLD}MEMORIA_OAUTH_CLIENT_ID:${RESET}     ${CLIENT_ID}
+  ${BOLD}MEMORIA_OAUTH_CLIENT_SECRET:${RESET} ${CLIENT_SECRET}
+  ${BOLD}MEMORIA_ADMIN_KEY:${RESET}           ${ADMIN_KEY}
+
+EOF
+prompt SAVED "Saved these? Type 'yes' to continue"
+if [ "$SAVED" != "yes" ] && [ "$SAVED" != "YES" ] && [ "$SAVED" != "y" ]; then
+    err "Setup aborted. Re-run when ready to save the credentials."
+    exit 1
+fi
+
+# ──── Step 5: Claude Code OAuth token ────────────────────────────────
+
+header "[5/8] Claude Code long-lived OAuth token"
+
+if [ "$DRY_RUN" = true ]; then
+    dim "[dry-run] would prompt for OAuth token (skipping interactive read)"
+    OAUTH_TOKEN="sk-ant-oat01-dryrun-placeholder-token-not-real"
+    ok "Token captured (dry-run synthetic)"
+else
+    say "  Memoria's REM consolidator and Dialectic loop call Haiku 4.5 via"
+    say "  the Anthropic API on your Claude subscription credit pool. This"
+    say "  requires a long-lived OAuth token (~1 year) generated by Claude Code."
+    say ""
+    say "  In another terminal, run:"
+    say "    ${BOLD}claude setup-token${RESET}"
+    say ""
+    say "  Copy the token (starts with ${BOLD}sk-ant-oat01-${RESET}) and paste here."
+
+    prompt_secret OAUTH_TOKEN "Paste OAuth token"
+    if [ -z "$OAUTH_TOKEN" ] || ! [[ "$OAUTH_TOKEN" == sk-ant-oat01-* ]]; then
+        err "That doesn't look like a Claude Code OAuth token (expected prefix sk-ant-oat01-)."
+        exit 1
+    fi
+    ok "Token captured"
+fi
+
+# ──── Step 6: Push secrets ───────────────────────────────────────────
+
+header "[6/8] Pushing secrets to Cloudflare"
+
+push_secret() {
+    local name="$1"
+    local value="$2"
+    if [ "$DRY_RUN" = true ]; then
+        dim "[dry-run] wrangler secret put $name"
+        return 0
+    fi
+    printf '%s' "$value" | wrangler secret put "$name" >/dev/null 2>&1
+}
+
+push_secret "MEMORIA_OAUTH_CLIENT_ID" "$CLIENT_ID"
+ok "MEMORIA_OAUTH_CLIENT_ID"
+push_secret "MEMORIA_OAUTH_CLIENT_SECRET" "$CLIENT_SECRET"
+ok "MEMORIA_OAUTH_CLIENT_SECRET"
+push_secret "MEMORIA_ADMIN_KEY" "$ADMIN_KEY"
+ok "MEMORIA_ADMIN_KEY"
+push_secret "CLAUDE_CODE_OAUTH_TOKEN" "$OAUTH_TOKEN"
+ok "CLAUDE_CODE_OAUTH_TOKEN"
+
+# ──── Step 7: Apply migrations ───────────────────────────────────────
+
+header "[7/8] Applying database migrations"
+if [ "$DRY_RUN" = true ]; then
+    dim "[dry-run] wrangler d1 migrations apply memoria-db --remote"
+else
+    # Use --yes to skip the interactive prompt; capture for failure handling.
+    if MIGRATE_OUT=$(wrangler d1 migrations apply memoria-db --remote --yes 2>&1); then
+        printf '%s\n' "$MIGRATE_OUT" | tail -10
+    else
+        err "Migrations failed. Output:"
+        printf '%s\n' "$MIGRATE_OUT" | sed 's/^/    /'
+        exit 1
+    fi
+fi
+ok "Migrations applied"
+
+# ──── Step 8: Deploy ─────────────────────────────────────────────────
+
+header "[8/8] Deploying worker"
+if [ "$DRY_RUN" = true ]; then
+    dim "[dry-run] wrangler deploy"
+    WORKER_URL="https://memoria-dryrun.workers.dev"
+else
+    DEPLOY_OUTPUT=$(wrangler deploy 2>&1)
+    printf '%s\n' "$DEPLOY_OUTPUT" | tail -8
+    WORKER_URL=$(printf '%s' "$DEPLOY_OUTPUT" \
+        | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1)
+    if [ -z "$WORKER_URL" ]; then
+        WORKER_URL="(check wrangler deploy output above)"
+    fi
+fi
+ok "Deployed: ${WORKER_URL}"
+
+# ──── Final summary ──────────────────────────────────────────────────
+
+cat <<EOF
+
+${BOLD}${GREEN}============================================================
+  Setup complete!
+============================================================${RESET}
+
+  ${BOLD}Worker URL${RESET}     ${WORKER_URL}
+
+  ${BOLD}Connect Claude.ai${RESET}
+    Settings → Connectors → Add Custom Connector
+    URL:           ${WORKER_URL}/mcp
+    Client ID:     ${CLIENT_ID}
+    Client Secret: (the one you saved above)
+
+  ${BOLD}If you see "invalid_request: redirect_uri not registered"${RESET}
+    Copy the URI from the 400 response body, then:
+      ${DIM}wrangler secret put MEMORIA_OAUTH_REDIRECT_URIS${RESET}
+      ${DIM}# enter: claude://oauth-callback;<URI from error>${RESET}
+
+  ${BOLD}Verify Memoria is running${RESET}
+    Open a Claude.ai conversation. Memoria should appear as an MCP
+    tool. Try asking Claude to remember something, then start a
+    new conversation and ask it to recall.
+
+  ${BOLD}Inspect cognitive activity${RESET}
+    ${DIM}wrangler d1 execute memoria-db --remote --command \\${RESET}
+    ${DIM}  "SELECT * FROM rem_runs ORDER BY started_at DESC LIMIT 5"${RESET}
+
+${BOLD}${GREEN}============================================================${RESET}
+
+EOF
