@@ -122,6 +122,48 @@ async fn read_client_creds(env: &Env) -> Result<(String, String)> {
     Ok((client_id, client_secret))
 }
 
+/// Default redirect URIs accepted when `MEMORIA_OAUTH_REDIRECT_URIS` is
+/// unset. Covers the canonical Claude desktop callback scheme. Override
+/// via wrangler secret when deploying behind a different client (or to
+/// add localhost dev callbacks during integration).
+const DEFAULT_ALLOWED_REDIRECT_URIS: &[&str] = &["claude://oauth-callback"];
+
+/// Read the redirect_uri allowlist. Order of precedence:
+///   1. `MEMORIA_OAUTH_REDIRECT_URIS` secret — semicolon-separated, e.g.
+///      `claude://oauth-callback;http://localhost:8765/cb`
+///   2. `DEFAULT_ALLOWED_REDIRECT_URIS` baked-in fallback.
+///
+/// Env var lets ops adjust the list in seconds without a code deploy if
+/// a client ever changes its callback URI.
+async fn read_allowed_redirect_uris(env: &Env) -> Vec<String> {
+    if let Ok(s) = env.secret("MEMORIA_OAUTH_REDIRECT_URIS") {
+        return s
+            .to_string()
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+    }
+    DEFAULT_ALLOWED_REDIRECT_URIS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Exact-match check against the registered redirect_uri list. Defends
+/// against open-redirect auth-code exfil (CLA-91 Fix 2): even if Fix 1's
+/// XSS escape ever regresses, an attacker can't redirect the code to a
+/// server they control because the URI must exactly match a registered
+/// entry.
+///
+/// Future: when memoria supports multiple clients, this becomes
+/// `is_registered_redirect_uri(client_id, uri)` with per-client storage.
+pub async fn is_registered_redirect_uri(env: &Env, uri: &str) -> bool {
+    let allowed = read_allowed_redirect_uris(env).await;
+    allowed.iter().any(|allowed| allowed == uri)
+}
+
 /// Constant-time string equality — guard against timing-attack secret
 /// recovery. Subtle: only constant-time for inputs of equal length;
 /// short-circuit on length mismatch is fine because length isn't secret.
@@ -168,6 +210,26 @@ pub fn authorization_server_metadata(base_url: &str) -> Result<Response> {
 // /authorize — consent page + form post
 // ──────────────────────────────────────────────────────────────────────
 
+/// Escape the five HTML-significant characters before interpolating any
+/// user-controlled string into HTML. Goblin (CLA-90 pentest) confirmed
+/// live XSS by injecting `<script>alert(1)</script>` as `client_id` and
+/// seeing it execute in the rendered consent page — every interpolation
+/// site below now routes through this.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn render_authorize_page(
     client_id: &str,
     redirect_uri: &str,
@@ -175,6 +237,15 @@ pub fn render_authorize_page(
     scope: &str,
     code_challenge: &str,
 ) -> Result<Response> {
+    // Escape every interpolation up-front. The render function never sees
+    // a raw user-controlled string between escape and interpolation —
+    // this is the lexical contract that closes CLA-91 Fix 1.
+    let client_id_e = html_escape(client_id);
+    let redirect_uri_e = html_escape(redirect_uri);
+    let state_e = html_escape(state);
+    let scope_e = html_escape(scope);
+    let code_challenge_e = html_escape(code_challenge);
+
     let html = format!(
         r#"<!DOCTYPE html>
 <html>
@@ -195,23 +266,42 @@ pub fn render_authorize_page(
 <body>
     <h1>Authorize Claude to access Memoria</h1>
     <div class="info">
-        <p>Client: {client_id}</p>
-        <p>Scope: {scope}</p>
+        <p>Client: {client_id_e}</p>
+        <p>Scope: {scope_e}</p>
     </div>
     <p>This will allow Claude to read and write to your memory store.</p>
     <form method="POST" action="/authorize">
-        <input type="hidden" name="client_id" value="{client_id}">
-        <input type="hidden" name="redirect_uri" value="{redirect_uri}">
-        <input type="hidden" name="state" value="{state}">
-        <input type="hidden" name="scope" value="{scope}">
-        <input type="hidden" name="code_challenge" value="{code_challenge}">
+        <input type="hidden" name="client_id" value="{client_id_e}">
+        <input type="hidden" name="redirect_uri" value="{redirect_uri_e}">
+        <input type="hidden" name="state" value="{state_e}">
+        <input type="hidden" name="scope" value="{scope_e}">
+        <input type="hidden" name="code_challenge" value="{code_challenge_e}">
         <button type="submit">Allow</button>
     </form>
 </body>
 </html>"#
     );
     let mut resp = Response::from_html(html)?;
-    resp.headers_mut().set("content-type", "text/html; charset=utf-8")?;
+    // CLA-91 Fix 3 — security headers on the consent page.
+    //
+    //   CSP script-src 'none'   — defense in depth if Fix 1 ever regresses;
+    //                             inline script execution blocked at the
+    //                             browser layer.
+    //   CSP form-action 'self'  — the form can only POST back to memoria,
+    //                             not to an attacker's exfil URL.
+    //   CSP frame-ancestors     — clickjacking-the-Allow-button blocked.
+    //   X-Frame-Options DENY    — same as above for older browsers that
+    //                             don't honour frame-ancestors.
+    //   X-Content-Type-Options  — stops MIME-sniff drift from changing the
+    //                             content-type the browser treats this as.
+    let headers = resp.headers_mut();
+    headers.set("content-type", "text/html; charset=utf-8")?;
+    headers.set(
+        "content-security-policy",
+        "default-src 'self'; script-src 'none'; form-action 'self'; frame-ancestors 'none'",
+    )?;
+    headers.set("x-frame-options", "DENY")?;
+    headers.set("x-content-type-options", "nosniff")?;
     Ok(resp)
 }
 
@@ -229,6 +319,15 @@ pub async fn handle_authorize_post(
     let (registered_client_id, _secret) = read_client_creds(env).await?;
     if !ct_eq(&client_id, &registered_client_id) {
         return Response::error("invalid_client", 400);
+    }
+
+    // CLA-91 Fix 2 — redirect_uri allowlist enforced at POST /authorize.
+    // Stops an attacker from creating a pending code that would later
+    // redirect to a server they control. Also enforced at GET /authorize
+    // (consent page render) and /token (code exchange) for defence in
+    // depth — any one of the three rejecting is enough.
+    if !is_registered_redirect_uri(env, &redirect_uri).await {
+        return Response::error("invalid_request: redirect_uri not registered", 400);
     }
 
     let code = generate_code();
@@ -316,6 +415,13 @@ async fn exchange_code(
     }
     if !ct_eq(&pending.redirect_uri, redirect_uri) {
         return token_error("invalid_grant", "redirect_uri mismatch", 400);
+    }
+    // CLA-91 Fix 2 — re-validate the stored redirect_uri against the
+    // current allowlist. Guards against the edge case where a pending
+    // code outlives a tightening of MEMORIA_OAUTH_REDIRECT_URIS, or where
+    // a pre-Fix-2 deploy created codes with redirect_uris we'd now reject.
+    if !is_registered_redirect_uri(env, &pending.redirect_uri).await {
+        return token_error("invalid_grant", "redirect_uri not registered", 400);
     }
     // (PKCE verification could go here in a follow-up.)
 

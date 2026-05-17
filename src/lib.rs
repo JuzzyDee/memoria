@@ -63,7 +63,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         (Method::Get, "/.well-known/oauth-authorization-server") => {
             worker_oauth::authorization_server_metadata(&base_url)
         }
-        (Method::Get, "/authorize") => render_consent_page(&req),
+        (Method::Get, "/authorize") => render_consent_page(&env, &req).await,
         (Method::Post, "/authorize") => handle_authorize_form(&env, &mut req).await,
         (Method::Post, "/token") => handle_token_form(&env, &mut req).await,
 
@@ -97,7 +97,12 @@ async fn mcp_endpoint(env: &Env, req: &mut Request) -> Result<Response> {
 
 /// GET /authorize — renders the consent HTML page. Query params:
 ///   client_id, redirect_uri, state, scope, code_challenge
-fn render_consent_page(req: &Request) -> Result<Response> {
+///
+/// CLA-91 Fix 2 — redirect_uri validated against the allowlist before
+/// the page renders. Unregistered URIs get a 400 instead of a primed
+/// consent page that would later create a pending code for an exfil
+/// destination.
+async fn render_consent_page(env: &Env, req: &Request) -> Result<Response> {
     let url = req.url()?;
     let q = |key: &str| -> String {
         url.query_pairs()
@@ -105,9 +110,13 @@ fn render_consent_page(req: &Request) -> Result<Response> {
             .map(|(_, v)| v.into_owned())
             .unwrap_or_default()
     };
+    let redirect_uri = q("redirect_uri");
+    if !worker_oauth::is_registered_redirect_uri(env, &redirect_uri).await {
+        return Response::error("invalid_request: redirect_uri not registered", 400);
+    }
     worker_oauth::render_authorize_page(
         &q("client_id"),
-        &q("redirect_uri"),
+        &redirect_uri,
         &q("state"),
         &q("scope"),
         &q("code_challenge"),
