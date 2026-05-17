@@ -172,6 +172,19 @@ wrangler secret put MEMORIA_OAUTH_CLIENT_SECRET    # generate yourself, e.g. ope
 
 # Optional — for embedded systems authenticating via plain Bearer
 wrangler secret put MEMORIA_API_KEYS               # semicolon-separated role:argon2-hash pairs
+
+# Optional — redirect_uri allowlist for the OAuth consent flow.
+# Defaults to `claude://oauth-callback` (Claude Desktop). If you're
+# connecting from Claude.ai web, mobile, or any other MCP client, you
+# must add its callback URI here or the consent flow will return
+# `invalid_request: redirect_uri not registered`.
+#
+# Find a client's actual callback URI by attempting to connect and
+# checking the 400 response body, or by tailing the worker:
+#   wrangler tail memoria
+#
+# Format: semicolon-separated, exact-match.
+wrangler secret put MEMORIA_OAUTH_REDIRECT_URIS    # e.g. claude://oauth-callback;https://claude.ai/oauth/callback
 ```
 
 ### Apply schema and deploy
