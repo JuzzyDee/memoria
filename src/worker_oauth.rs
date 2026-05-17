@@ -284,21 +284,36 @@ pub fn render_authorize_page(
     let mut resp = Response::from_html(html)?;
     // CLA-91 Fix 3 — security headers on the consent page.
     //
-    //   CSP script-src 'none'   — defense in depth if Fix 1 ever regresses;
-    //                             inline script execution blocked at the
-    //                             browser layer.
-    //   CSP form-action 'self'  — the form can only POST back to memoria,
-    //                             not to an attacker's exfil URL.
-    //   CSP frame-ancestors     — clickjacking-the-Allow-button blocked.
-    //   X-Frame-Options DENY    — same as above for older browsers that
-    //                             don't honour frame-ancestors.
-    //   X-Content-Type-Options  — stops MIME-sniff drift from changing the
-    //                             content-type the browser treats this as.
+    //   CSP script-src 'none'           — defense in depth if Fix 1 ever
+    //                                     regresses; inline script execution
+    //                                     blocked at the browser layer.
+    //   CSP style-src 'self' inline     — the consent page uses an inline
+    //                                     <style> block (no external CSS to
+    //                                     serve). Inline style XSS is much
+    //                                     weaker than script XSS (cosmetic,
+    //                                     not exfil), so 'unsafe-inline' is
+    //                                     an acceptable tradeoff to avoid
+    //                                     serving a separate stylesheet.
+    //   CSP frame-ancestors             — clickjacking the Allow button
+    //                                     blocked.
+    //   X-Frame-Options DENY            — same as above for older browsers
+    //                                     that don't honour frame-ancestors.
+    //   X-Content-Type-Options nosniff  — stops MIME-sniff drift from
+    //                                     changing the content-type the
+    //                                     browser treats this as.
+    //
+    // Deliberately NOT setting form-action: browsers enforce it against the
+    // entire redirect chain, not just the initial POST target. The server
+    // responds to the form POST with a 302 to the OAuth client's
+    // redirect_uri (claude.ai, etc.), and form-action 'self' silently
+    // blocks that redirect in Chrome. The redirect_uri allowlist (Fix 2)
+    // provides the same protection at the server layer — only registered
+    // URIs can be redirect targets.
     let headers = resp.headers_mut();
     headers.set("content-type", "text/html; charset=utf-8")?;
     headers.set(
         "content-security-policy",
-        "default-src 'self'; script-src 'none'; form-action 'self'; frame-ancestors 'none'",
+        "default-src 'self'; script-src 'none'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
     )?;
     headers.set("x-frame-options", "DENY")?;
     headers.set("x-content-type-options", "nosniff")?;
