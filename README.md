@@ -125,7 +125,7 @@ cd memoria
 ./scripts/setup.sh
 ```
 
-That's the deploy. The script walks you through Cloudflare resource creation, credential generation, timezone-aware cron configuration, secret push, schema migration, and worker deploy — about one hour end-to-end, mostly waiting on wrangler. Run with `--dry-run` first if you want to see what it will do without touching your account.
+That's the deploy. The script walks you through Cloudflare resource creation, credential generation, timezone-aware cron configuration, secret push, schema migration, and worker deploy — usually a few minutes once prerequisites are installed, plus however long Cloudflare deploys take. Run with `--dry-run` first if you want to see what it will do without touching your account.
 
 ### What you'll need first
 
@@ -161,7 +161,7 @@ wrangler secret put MEMORIA_OAUTH_REDIRECT_URIS
 # enter: claude://oauth-callback;<the URI from the error>
 ```
 
-For embedded systems with no UI, use a service API key as a plain `Authorization: Bearer <key>` instead. Push the allowlist via `wrangler secret put MEMORIA_API_KEYS`.
+For embedded systems with no UI, use a service API key as a plain `Authorization: Bearer <key>` instead. Add service keys via `wrangler secret put MEMORIA_API_KEYS` (semicolon-separated `role:argon2-hash` entries).
 
 ### Verifying Memoria is running
 
