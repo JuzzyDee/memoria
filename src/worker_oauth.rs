@@ -255,21 +255,35 @@ pub fn render_authorize_page(
     <style>
         body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 440px;
                 margin: 80px auto; padding: 24px; background: #1a1a1a; color: #e0e0e0; }}
-        h1 {{ font-size: 1.4em; }}
-        .info {{ background: #2a2a2a; padding: 16px; border-radius: 8px; margin: 20px 0; }}
+        h1 {{ font-size: 1.4em; margin-bottom: 24px; }}
+        .info {{ background: #2a2a2a; padding: 16px 20px; border-radius: 8px; margin: 20px 0; }}
         .info p {{ margin: 4px 0; color: #999; font-size: 0.9em; }}
-        button {{ background: #4a9eff; color: white; border: none; padding: 12px 24px;
-                  border-radius: 6px; font-size: 1em; cursor: pointer; width: 100%; }}
+        .scope-intro {{ color: #b0b0b0; margin: 20px 0 8px; font-size: 0.95em; }}
+        .scope {{ list-style: none; padding-left: 0; margin: 0 0 28px;
+                  color: #b0b0b0; font-size: 0.95em; }}
+        .scope li {{ margin: 8px 0; padding-left: 22px; position: relative; }}
+        .scope li::before {{ content: '→'; position: absolute; left: 0;
+                             color: #4a9eff; font-weight: 600; }}
+        button {{ background: #4a9eff; color: white; border: none;
+                  padding: 18px 28px; border-radius: 10px;
+                  font-size: 1.1em; font-weight: 600; letter-spacing: 0.02em;
+                  cursor: pointer; width: 100%;
+                  transition: background 150ms ease, transform 80ms ease; }}
         button:hover {{ background: #3a8eef; }}
+        button:active {{ transform: translateY(1px); }}
     </style>
 </head>
 <body>
     <h1>Authorize Claude to access Memoria</h1>
     <div class="info">
         <p>Client: {client_id_e}</p>
-        <p>Scope: {scope_e}</p>
     </div>
-    <p>This will allow Claude to read and write to your memory store.</p>
+    <p class="scope-intro">This will allow Claude to:</p>
+    <ul class="scope">
+        <li>Read memories</li>
+        <li>Update memories</li>
+        <li>Forget memories</li>
+    </ul>
     <form method="POST" action="/authorize">
         <input type="hidden" name="client_id" value="{client_id_e}">
         <input type="hidden" name="redirect_uri" value="{redirect_uri_e}">
