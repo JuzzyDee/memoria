@@ -268,7 +268,11 @@ else
         D1_ID=$(printf '%s' "$D1_OUTPUT" | grep -oE 'database_id = "[a-f0-9-]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
     else
         # Likely already exists; pull current value from wrangler.toml
-        D1_ID=$(awk '/database_name = "oneiro-db"/{found=1} found && /database_id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
+        # Split on quote chars — for `database_id = "abc"`, a[2] is `abc`.
+        # The earlier `gsub(/.*"|".*/, "")` pattern was broken: `.*"` matches
+        # greedily to the LAST quote in the line, so the entire line gets
+        # replaced and we get an empty string back.
+        D1_ID=$(awk '/database_name = "oneiro-db"/{found=1} found && /database_id = /{split($0, a, "\""); print a[2]; exit}' wrangler.toml)
         warn "D1 'oneiro-db' may already exist. Using existing id from wrangler.toml: ${D1_ID}"
     fi
     if [ -z "${D1_ID}" ]; then
@@ -303,7 +307,7 @@ else
     if KV_OUTPUT=$(wrangler kv namespace create ONEIRO_TOKENS 2>&1); then
         KV_ID=$(printf '%s' "$KV_OUTPUT" | grep -oE 'id = "[a-f0-9]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
     else
-        KV_ID=$(awk '/binding = "TOKENS"/{found=1} found && /^id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
+        KV_ID=$(awk '/binding = "TOKENS"/{found=1} found && /^id = /{split($0, a, "\""); print a[2]; exit}' wrangler.toml)
         warn "KV 'ONEIRO_TOKENS' may already exist. Using existing id from wrangler.toml: ${KV_ID}"
     fi
     if [ -z "${KV_ID}" ]; then
@@ -322,7 +326,7 @@ else
     if VKV_OUTPUT=$(wrangler kv namespace create ONEIRO_VERSION_CACHE 2>&1); then
         VERSION_KV_ID=$(printf '%s' "$VKV_OUTPUT" | grep -oE 'id = "[a-f0-9]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
     else
-        VERSION_KV_ID=$(awk '/binding = "VERSION_CACHE"/{found=1} found && /^id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
+        VERSION_KV_ID=$(awk '/binding = "VERSION_CACHE"/{found=1} found && /^id = /{split($0, a, "\""); print a[2]; exit}' wrangler.toml)
         warn "KV 'ONEIRO_VERSION_CACHE' may already exist. Using existing id from wrangler.toml: ${VERSION_KV_ID}"
     fi
     if [ -z "${VERSION_KV_ID}" ]; then
@@ -531,8 +535,12 @@ header "[7/8] Applying database migrations"
 if [ "$DRY_RUN" = true ]; then
     dim "[dry-run] wrangler d1 migrations apply oneiro-db --remote"
 else
-    # Use --yes to skip the interactive prompt; capture for failure handling.
-    if MIGRATE_OUT=$(wrangler d1 migrations apply oneiro-db --remote --yes 2>&1); then
+    # Pipe a 'y' to auto-confirm the migration prompt. Newer wrangler
+    # versions dropped the --yes flag in favour of TTY detection — and
+    # rather than depending on wrangler's auto-detect (which got it wrong
+    # for an interactive setup.sh run on 2026-05-18), we answer the prompt
+    # deterministically. Capture stderr for failure handling.
+    if MIGRATE_OUT=$(printf 'y\n' | wrangler d1 migrations apply oneiro-db --remote 2>&1); then
         printf '%s\n' "$MIGRATE_OUT" | tail -10
     else
         err "Migrations failed. Output:"
