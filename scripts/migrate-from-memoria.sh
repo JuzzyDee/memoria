@@ -234,13 +234,18 @@ else
         # is for AUTOINCREMENT counters (we don't use any, but if a
         # future migration adds one, we'd still want the dest's
         # sequence state, not the source's).
+        #
+        # wrangler d1 export quotes table names in the INSERT statements
+        # (e.g. `INSERT INTO "d1_migrations" (...)`). The `"?` in each
+        # pattern makes the leading quote optional so the filter survives
+        # whatever convention a future wrangler version settles on.
         sed -E \
             -e '/^CREATE TABLE/,/);$/d' \
             -e '/^CREATE INDEX/d' \
             -e '/^CREATE UNIQUE INDEX/d' \
-            -e '/^INSERT INTO d1_migrations/d' \
-            -e '/^INSERT INTO sqlite_sequence/d' \
-            -e '/^INSERT INTO "_cf/d' \
+            -e '/^INSERT INTO "?d1_migrations"?/d' \
+            -e '/^INSERT INTO "?sqlite_sequence"?/d' \
+            -e '/^INSERT INTO "?_cf/d' \
             "$DUMP_FILE" > "$DATA_FILE"
         INSERTS=$(grep -c "^INSERT" "$DATA_FILE" || true)
         ok "Transformed: $INSERTS INSERT statements ready"
