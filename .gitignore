@@ -16,3 +16,6 @@ node_modules/
 # Per-deployment account-specific resource IDs — copy wrangler.toml.example
 # to wrangler.toml on first install (handled automatically by setup.sh).
 wrangler.toml
+# setup.sh's safety backup before patching IDs — same sensitivity as
+# wrangler.toml; do not commit.
+wrangler.toml.bak
