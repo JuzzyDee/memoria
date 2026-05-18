@@ -1322,7 +1322,7 @@ async fn serve_http(
     tracing::info!("OAuth enabled. Client ID: {}", auth_state.client_id());
 
     // Build the request handler that routes between OAuth and MCP
-    let make_handler = move |mcp_svc: StreamableHttpService<MemoriaServer>,
+    let make_handler = move |mcp_svc: StreamableHttpService<MemoriaServer, rmcp::transport::streamable_http_server::session::local::LocalSessionManager>,
                              auth: Arc<auth::AuthState>,
                              limiter: Arc<RateLimiter>,
                              peer_ip: String,
