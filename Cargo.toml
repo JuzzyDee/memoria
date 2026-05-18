@@ -35,7 +35,7 @@ serde_json = "1"
 # transport implementations (which pull in axum/tower/hyper on native)
 # aren't pulled into the universal graph. Native bins re-add them in
 # the cfg-gated block. wasm32 uses just server + macros.
-rmcp = { version = "=1.2.0", default-features = false, features = ["server", "macros"] }
+rmcp = { version = "1.4", default-features = false, features = ["server", "macros"] }
 schemars = "0.8"
 
 # Time, IDs, basic primitives
@@ -105,7 +105,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Native MCP transports — adds streamable-HTTP-server (uses hyper/tower)
 # on top of the universal server+macros features. Cargo unions features
 # for the same dep, so the native build gets all four.
-rmcp = { version = "=1.2.0", features = ["transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "1.4", features = ["transport-io", "transport-streamable-http-server"] }
 
 # Memory store (rusqlite — replaced by D1 binding on the worker side)
 rusqlite = { version = "0.31", features = ["bundled"] }
