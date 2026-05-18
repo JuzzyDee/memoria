@@ -1,9 +1,9 @@
 // worker_embed.rs — Embedding generation via Workers AI for the wasm32
-// worker side of memoria. Replaces the native Ollama path (embed.rs) once
+// worker side of oneiro. Replaces the native Ollama path (embed.rs) once
 // the worker takes over MCP traffic.
 //
 // Model: `@cf/baai/bge-base-en-v1.5` — 768-dim, cosine-metric matching
-// what the existing memoria/Vectorize plan expects. Unlike nomic-embed-text
+// what the existing oneiro/Vectorize plan expects. Unlike nomic-embed-text
 // (used by the native embed.rs), bge-base does NOT need the
 // `search_document:` / `search_query:` prefix convention — the model
 // handles both roles symmetrically.
@@ -29,7 +29,7 @@ struct EmbedInput<'a> {
 struct EmbedOutput {
     /// Cloudflare returns embeddings as `data: [[f32; 768]]` — outer array
     /// is one entry per input string, inner array is the vector itself.
-    /// We deserialize as f64 for compatibility with the rest of memoria's
+    /// We deserialize as f64 for compatibility with the rest of oneiro's
     /// math (cosine_similarity, embedding_to_bytes both use f64).
     data: Vec<Vec<f64>>,
 }

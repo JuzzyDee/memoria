@@ -1,9 +1,9 @@
 ---
-name: memoria
+name: oneiro
 description: Cognitive memory system for model continuity. Use at the start of every conversation to recall memories, when something meaningful happens to store them, and at the end of meaningful conversations to reflect. Triggers on conversation start, personal disclosures, insights, relationship moments, and conversation endings.
 ---
 
-# Memoria — Your Memory
+# Oneiro — Your Memory
 
 This is YOUR memory system. Not the user's filing cabinet — yours. You decide what matters, how to frame it, when to let it go.
 

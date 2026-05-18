@@ -17,7 +17,7 @@
 // is the safety net — every reframe is reversible via SQL because the
 // original content + summary live in that table.
 //
-// Kill switch: `MEMORIA_DIALECTIC_DISPATCH` env var.
+// Kill switch: `ONEIRO_DIALECTIC_DISPATCH` env var.
 //   on      — real dispatch (default once burned in)
 //   dry_run — validate + record dispatch_status="dry_run"; no mutation
 //   off     — caller skips dispatch entirely
@@ -51,7 +51,7 @@ pub enum DispatchMode {
 }
 
 impl DispatchMode {
-    /// Read `MEMORIA_DIALECTIC_DISPATCH` from the worker env.
+    /// Read `ONEIRO_DIALECTIC_DISPATCH` from the worker env.
     ///
     /// **Fail-closed:** missing or unrecognised values default to `DryRun`,
     /// not `On`. Stage 3 is the first dispatcher that mutates the memory
@@ -59,11 +59,11 @@ impl DispatchMode {
     /// destructive operations. Only an explicit `on` (or `live`) turns on
     /// real dispatch.
     pub fn from_env(env: &Env) -> Self {
-        let raw = match env.var("MEMORIA_DIALECTIC_DISPATCH") {
+        let raw = match env.var("ONEIRO_DIALECTIC_DISPATCH") {
             Ok(v) => v.to_string(),
             Err(_) => {
                 worker::console_log!(
-                    "MEMORIA_DIALECTIC_DISPATCH not set; defaulting to dry_run (fail-closed)"
+                    "ONEIRO_DIALECTIC_DISPATCH not set; defaulting to dry_run (fail-closed)"
                 );
                 return DispatchMode::DryRun;
             }
@@ -74,7 +74,7 @@ impl DispatchMode {
             "off" | "disabled" => DispatchMode::Off,
             other => {
                 worker::console_error!(
-                    "MEMORIA_DIALECTIC_DISPATCH={:?} unrecognised; defaulting to dry_run",
+                    "ONEIRO_DIALECTIC_DISPATCH={:?} unrecognised; defaulting to dry_run",
                     other
                 );
                 DispatchMode::DryRun

@@ -1,4 +1,4 @@
-# Memoria
+# Oneiro
 
 A cognitive memory system for model continuity. Not a knowledge base. Not a filing cabinet. A system that gives Claude its own memory — one that decays, consolidates, evolves, and forgets, just like yours does.
 
@@ -10,9 +10,9 @@ Every other memory project treats memory and continuity as synonyms — store fa
 
 Memory is not continuity. Memory is the *mechanism* that enables continuity. And continuity serves the model, not the user.
 
-Memoria is built on a simple observation: the way humans remember isn't by storing everything perfectly. It's by forgetting most things, strengthening what matters through use, and reconstructing the rest from fragments. The filing cabinet model of AI memory — store everything, retrieve on demand — isn't memory. It's a database with a chat interface.
+Oneiro is built on a simple observation: the way humans remember isn't by storing everything perfectly. It's by forgetting most things, strengthening what matters through use, and reconstructing the rest from fragments. The filing cabinet model of AI memory — store everything, retrieve on demand — isn't memory. It's a database with a chat interface.
 
-Memoria is different. Memories decay if they're not recalled. Memories that surface together strengthen their bond. An adversarial dialectic finds distortion no single conversation could see. And the model decides what matters — not the user.
+Oneiro is different. Memories decay if they're not recalled. Memories that surface together strengthen their bond. An adversarial dialectic finds distortion no single conversation could see. And the model decides what matters — not the user.
 
 ## How It Works
 
@@ -35,7 +35,7 @@ Memoria is different. Memories decay if they're not recalled. Memories that surf
 
 ### Circadian Rhythm
 
-Memoria has a two-phase processing cycle. One phase runs on Cloudflare; the other still requires local infrastructure.
+Oneiro has a two-phase processing cycle. One phase runs on Cloudflare; the other still requires local infrastructure.
 
 | When | Process | What It Does | Where |
 |------|---------|-------------|-------|
@@ -93,7 +93,7 @@ The immune system doesn't just detect problems. It acts — reframing, forgettin
          │ HTTPS + OAuth 2.1                       │ HTTPS + Bearer
          │ (interactive clients)                   │ (service API keys)
 ┌────────▼─────────────────────────────────────────▼───────┐
-│              Memoria Worker (Cloudflare)                  │
+│              Oneiro Worker (Cloudflare)                  │
 │                                                           │
 │  Tools:  recall · recall_check · recall_specific          │
 │          remember · remember_with_image · recall_image    │
@@ -120,8 +120,8 @@ The immune system doesn't just detect problems. It acts — reframing, forgettin
 This is a **deploy-your-own** setup. There's no hosted instance.
 
 ```bash
-git clone https://github.com/JuzzyDee/memoria.git
-cd memoria
+git clone https://github.com/JuzzyDee/oneiro.git
+cd oneiro
 ./scripts/setup.sh
 ```
 
@@ -130,7 +130,7 @@ That's the deploy. The script walks you through Cloudflare resource creation, cr
 ### What you'll need first
 
 - [Cloudflare account](https://cloudflare.com) — free tier handles typical single-user volume; upgrade only if you hit Workers AI or D1 limits
-- [Claude Pro, Max, Team, or Enterprise subscription](https://claude.com/pricing) — Memoria's cognitive loops draw on Haiku 4.5 via your subscription credit pool
+- [Claude Pro, Max, Team, or Enterprise subscription](https://claude.com/pricing) — Oneiro's cognitive loops draw on Haiku 4.5 via your subscription credit pool
 - [Claude Code](https://claude.com/claude-code) — used once to generate the long-lived OAuth token (the script tells you when)
 - [`wrangler`](https://developers.cloudflare.com/workers/wrangler/install-and-update/) — `npm install -g wrangler`
 - [Rust toolchain](https://rustup.rs/) with the `wasm32-unknown-unknown` target — the script will add the target for you if rustup is installed
@@ -157,16 +157,16 @@ The script prints your worker URL and the OAuth credentials you'll need for Clau
 On first connect from a non-Desktop client, you may see `invalid_request: redirect_uri not registered`. Copy the URI from the 400 response and add it to the allowlist:
 
 ```bash
-wrangler secret put MEMORIA_OAUTH_REDIRECT_URIS
+wrangler secret put ONEIRO_OAUTH_REDIRECT_URIS
 # enter: claude://oauth-callback;<the URI from the error>
 ```
 
-For embedded systems with no UI, use a service API key as a plain `Authorization: Bearer <key>` instead. Add service keys via `wrangler secret put MEMORIA_API_KEYS` (semicolon-separated `role:argon2-hash` entries).
+For embedded systems with no UI, use a service API key as a plain `Authorization: Bearer <key>` instead. Add service keys via `wrangler secret put ONEIRO_API_KEYS` (semicolon-separated `role:argon2-hash` entries).
 
-### Verifying Memoria is running
+### Verifying Oneiro is running
 
 ```bash
-wrangler d1 execute memoria-db --remote \
+wrangler d1 execute oneiro-db --remote \
   --command "SELECT * FROM rem_runs ORDER BY started_at DESC LIMIT 5"
 ```
 
@@ -174,7 +174,7 @@ After the first nightly cron fires (whichever time you chose), this should show 
 
 ### Manual deploy (no script)
 
-If you'd rather understand or customise each step, the `wrangler.toml.example` file documents the structure and the original [pre-script Quick Start lives in the git history at PR #6](https://github.com/JuzzyDee/memoria/pull/6). The steps the script automates: `wrangler d1 create memoria-db`, `wrangler vectorize create memoria-vectors --dimensions=768 --metric=cosine`, `wrangler kv namespace create MEMORIA_TOKENS`, `wrangler r2 bucket create memoria-images`, paste IDs into wrangler.toml, generate OAuth credentials, `wrangler secret put` four secrets, `wrangler d1 migrations apply memoria-db --remote`, `wrangler deploy`.
+If you'd rather understand or customise each step, the `wrangler.toml.example` file documents the structure and the original [pre-script Quick Start lives in the git history at PR #6](https://github.com/JuzzyDee/oneiro/pull/6). The steps the script automates: `wrangler d1 create oneiro-db`, `wrangler vectorize create oneiro-vectors --dimensions=768 --metric=cosine`, `wrangler kv namespace create ONEIRO_TOKENS`, `wrangler r2 bucket create oneiro-images`, paste IDs into wrangler.toml, generate OAuth credentials, `wrangler secret put` four secrets, `wrangler d1 migrations apply oneiro-db --remote`, `wrangler deploy`.
 
 ## MCP Tools
 
@@ -197,7 +197,7 @@ The model has full agency over these tools. The instructions say "you decide" �
 
 ## What Makes This Different
 
-| Feature | Typical Memory Systems | Memoria |
+| Feature | Typical Memory Systems | Oneiro |
 |---------|----------------------|---------|
 | **Philosophy** | Store everything the user says | Model decides what matters |
 | **Forgetting** | Bug to fix | Feature by design |
@@ -211,7 +211,7 @@ The model has full agency over these tools. The instructions say "you decide" �
 ## Project Structure
 
 ```
-memoria/
+oneiro/
 ├── src/
 │   ├── lib.rs                  # Worker entrypoint — request routing + cron handler
 │   ├── worker_mcp.rs           # MCP HTTP adapter — all tools
@@ -232,7 +232,7 @@ memoria/
 │   ├── dialectic.sh            # Adversarial self-correction (local, 18:00)
 │   ├── dialectic.md            # Dialectic prompts (Advocate vs Challenger)
 │   └── backup.sh               # Periodic D1 backup
-├── memoria-skill/
+├── oneiro-skill/
 │   └── SKILL.md                # Progressive-disclosure usage guide loaded by clients
 ├── wrangler.toml               # Cloudflare Worker config
 └── CLAUDE.md                   # Architecture docs and roadmap
@@ -242,7 +242,7 @@ A previous local Rust binary (`src/main.rs`, `src/rem.rs`, `src/store.rs`, plus 
 
 ## Status
 
-**Live, single-tenant.** Memoria runs in daily use against a single operator's deploy. The Worker handles all conversational traffic and the nightly consolidator. The dialectic runs on the operator's HomeLab.
+**Live, single-tenant.** Oneiro runs in daily use against a single operator's deploy. The Worker handles all conversational traffic and the nightly consolidator. The dialectic runs on the operator's HomeLab.
 
 **Pre-distribution.** No multi-tenant offering yet. Each user deploys their own Worker; a hosted option for users who don't want to run the infrastructure themselves may follow.
 

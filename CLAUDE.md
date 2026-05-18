@@ -1,4 +1,4 @@
-# CLAUDE.md — Memoria
+# CLAUDE.md — Oneiro
 
 ## What This Is
 
@@ -48,7 +48,7 @@ Three scheduled processes on the always-on server:
 
 | Time | Process | What It Does |
 |------|---------|-------------|
-| **3am** | REM engine (`memoria-rem`) | Ebbinghaus decay, Hebbian co-activation reporting, mechanical consolidation of frequently co-activated episodic pairs. Pure Rust, zero API cost. |
+| **3am** | REM engine (`oneiro-rem`) | Ebbinghaus decay, Hebbian co-activation reporting, mechanical consolidation of frequently co-activated episodic pairs. Pure Rust, zero API cost. |
 | **5am** | Consolidation (`consolidate.sh`) | Refines overnight mechanical merges into coherent narratives. Sonnet via Claude Code. |
 | **6pm** | Subconscious (`think.sh`) | Pattern-finding and synthesis. Surveys the full store via `review`, goes deep on interesting threads, crystallises insights no single conversation could see. Sonnet via Claude Code. |
 
@@ -73,22 +73,22 @@ cargo test                     # run all tests (22 tests)
 ### Local (stdio) — for Claude Code and Desktop
 ```bash
 # Run directly
-./target/release/memoria
+./target/release/oneiro
 
 # Register with Claude Code
-claude mcp add --scope user memoria -- /path/to/target/release/memoria
+claude mcp add --scope user oneiro -- /path/to/target/release/oneiro
 
 # Custom database location
-MEMORIA_DB=/path/to/memoria.db ./target/release/memoria
+ONEIRO_DB=/path/to/oneiro.db ./target/release/oneiro
 ```
 
 ### Remote (HTTPS) — for Web, iOS, Mobile, and cross-device access
 ```bash
 # Behind a reverse proxy (e.g. Tailscale Funnel)
-./target/release/memoria --port 3000 --no-tls
+./target/release/oneiro --port 3000 --no-tls
 
 # Direct HTTPS with TLS certs
-./target/release/memoria --port 3000
+./target/release/oneiro --port 3000
 ```
 
 First run generates OAuth credentials (Client ID + Secret). Enter these in the Claude connector UI. The secret is shown once and stored as an argon2 hash.
@@ -101,7 +101,7 @@ First run generates OAuth credentials (Client ID + Secret). Enter these in the C
 
 Uses ATTACH for reliable cross-database merging. Respects tombstones — forgotten memories stay forgotten across sync.
 
-Default database: `~/.memoria/memoria.db`
+Default database: `~/.oneiro/oneiro.db`
 
 ## Project Structure
 
@@ -120,8 +120,8 @@ scripts/
 ├── consolidate.md    — Consolidation refinement prompt
 └── sync.sh           — Bidirectional merge sync between databases
 
-memoria-skill/
-├── SKILL.md              — Progressive disclosure instructions for using Memoria
+oneiro-skill/
+├── SKILL.md              — Progressive disclosure instructions for using Oneiro
 ├── scripts/eval.py       — Eval test framework
 └── references/           — Architecture documentation
 ```
@@ -139,7 +139,7 @@ memoria-skill/
 
 ## Infrastructure
 
-- **Server**: "Memoria" — M1 Pro MBP (14", 16GB), macOS Tahoe, Tailscale, always-on
+- **Server**: "Oneiro" — M1 Pro MBP (14", 16GB), macOS Tahoe, Tailscale, always-on
 - **Embedding model**: nomic-embed-text on Ollama (274MB, <20ms per embedding)
 - **Scheduled processing**: launchd on macOS (REM at 3am, consolidation at 5am, subconscious at 6pm)
 - **Auth**: OAuth 2.1 authorization code flow, 7-day Bearer tokens, argon2-hashed credentials
@@ -159,7 +159,7 @@ memoria-skill/
 - [x] Consolidation pass (morning refinement of overnight merges)
 - [x] Remote MCP transport (HTTPS with Tailscale Funnel)
 - [x] OAuth 2.1 authentication (authorization code flow)
-- [x] Memoria skill (SKILL.md with progressive disclosure)
+- [x] Oneiro skill (SKILL.md with progressive disclosure)
 - [x] Review tool (full landscape survey for subconscious)
 - [x] Forget tool with tombstones (conscious pruning + sync safety)
 - [x] Bidirectional merge sync

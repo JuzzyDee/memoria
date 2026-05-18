@@ -5,7 +5,7 @@
 // to /admin/import, repeat — works for both the initial migration and
 // any future "export → restore" scenarios.
 //
-// Auth: a dedicated MEMORIA_ADMIN_KEY wrangler secret (not the
+// Auth: a dedicated ONEIRO_ADMIN_KEY wrangler secret (not the
 // per-role service key allowlist). Constant-time compare. The admin key
 // is the most privileged credential on the system — it can write
 // memories verbatim (bypassing entity-binding + recorded_by forcing),
@@ -58,7 +58,7 @@ fn authorize(env: &Env, req: &Request) -> Result<bool> {
         .and_then(|h| h.strip_prefix("Bearer ").map(|s| s.to_string()))
         .unwrap_or_default();
     let expected = env
-        .secret("MEMORIA_ADMIN_KEY")
+        .secret("ONEIRO_ADMIN_KEY")
         .map(|s| s.to_string())
         .unwrap_or_default();
     if expected.is_empty() {
@@ -105,7 +105,7 @@ pub async fn handle_import(env: &Env, req: &mut Request) -> Result<Response> {
     }
 
     // 3 + 4. Re-embed with bge-base, upsert to Vectorize. The original
-    //        local memoria used nomic-embed-text — those vectors aren't
+    //        local oneiro used nomic-embed-text — those vectors aren't
     //        compatible with bge-base's space, so we have to re-embed.
     //        Worth doing once at migration time so future semantic
     //        recalls use a uniform embedding model.

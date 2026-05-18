@@ -2,11 +2,11 @@
 #
 # .dev.vars is gitignored (never commit secrets). For production, push
 # these as wrangler secrets:
-#   wrangler secret put MEMORIA_API_KEYS
+#   wrangler secret put ONEIRO_API_KEYS
 
 # CLA-86 service API keys — semicolon-separated `<role>:<argon2-hash>`
-# entries. Generate via `cargo run --bin memoria -- keygen --role rover`,
+# entries. Generate via `cargo run --bin oneiro -- keygen --role rover`,
 # paste the HASH side here (raw side goes in the rover's .env).
-MEMORIA_API_KEYS=
+ONEIRO_API_KEYS=
 
 # Future: any other dev-time secrets land here.

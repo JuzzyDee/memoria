@@ -1,4 +1,4 @@
-// lib.rs — Memoria as a Cloudflare Worker (CLA-84).
+// lib.rs — Oneiro as a Cloudflare Worker (CLA-84).
 //
 // Public surface, by design, is just POST /mcp (authenticated MCP via
 // JSON-RPC). Everything else falls through to a placeholder string —
@@ -48,7 +48,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let host = req
         .headers()
         .get("host")?
-        .unwrap_or_else(|| "memoria.juzzydee.workers.dev".to_string());
+        .unwrap_or_else(|| "oneiro.juzzydee.workers.dev".to_string());
     let base_url = format!("https://{}", host);
 
     match (method, path.as_str()) {
@@ -58,7 +58,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
         // Admin import — verbatim memory write for the data migration
         // (CLA-84 phase 8) and future disaster-recovery flows. Auth via
-        // MEMORIA_ADMIN_KEY secret, NOT the per-role service-key allowlist.
+        // ONEIRO_ADMIN_KEY secret, NOT the per-role service-key allowlist.
         (Method::Post, "/admin/import") => worker_admin::handle_import(&env, &mut req).await,
 
         // OAuth 2.1 — Authorization Code + Client Credentials grants.
@@ -76,7 +76,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         (Method::Get, "/healthz") => Response::ok("ok"),
 
         // Default — no info leakage.
-        _ => Response::ok("memoria"),
+        _ => Response::ok("oneiro"),
     }
 }
 

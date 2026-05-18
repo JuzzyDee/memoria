@@ -1,4 +1,4 @@
--- migrations/0001_initial.sql — Initial D1 schema for memoria (CLA-84).
+-- migrations/0001_initial.sql — Initial D1 schema for oneiro (CLA-84).
 --
 -- Derived from the existing SQLite schema in src/store.rs:138-229,
 -- consolidated and adapted for D1. Differences from the local schema:
@@ -16,7 +16,7 @@
 --     are still wired up. Drop in a later migration once `forget` is
 --     refactored.
 --
--- Apply with: `wrangler d1 migrations apply memoria-db`.
+-- Apply with: `wrangler d1 migrations apply oneiro-db`.
 
 CREATE TABLE IF NOT EXISTS memories (
     id TEXT PRIMARY KEY,

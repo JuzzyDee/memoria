@@ -1,5 +1,5 @@
 #!/bin/bash
-# sync.sh — Bidirectional merge sync between local and remote Memoria databases
+# sync.sh — Bidirectional merge sync between local and remote Oneiro databases
 #
 # Merges unique memories from both sides while respecting tombstones.
 #
@@ -8,12 +8,12 @@
 #   ./scripts/sync.sh user@host          # Sync with specific remote
 
 REMOTE="${1:-justindavis@100.74.207.81}"
-LOCAL_DB="$HOME/.memoria/memoria.db"
-REMOTE_DB_PATH=".memoria/memoria.db"
+LOCAL_DB="$HOME/.oneiro/oneiro.db"
+REMOTE_DB_PATH=".oneiro/oneiro.db"
 TEMP_DIR=$(mktemp -d)
 REMOTE_COPY="$TEMP_DIR/remote.db"
 
-echo "═══ Memoria Sync ═══"
+echo "═══ Oneiro Sync ═══"
 echo "Local:  $LOCAL_DB"
 echo "Remote: $REMOTE:$REMOTE_DB_PATH"
 echo ""
