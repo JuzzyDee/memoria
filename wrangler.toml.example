@@ -106,4 +106,10 @@ crons = ["0 14 * * *", "0 8 * * *"]
 #   MEMORIA_API_KEYS              — optional; semicolon-separated
 #                                   role:<argon2-hash> entries for
 #                                   embedded clients (CLA-86).
+#   MEMORIA_DIALECTIC_DISPATCH    — Stage 3 dispatcher mode. Setup script
+#                                   sets "on" for fresh deploys. Override
+#                                   to "dry_run" or "off" during burn-in
+#                                   or to silence dispatch. Missing or
+#                                   unrecognised values fail-closed to
+#                                   "dry_run" (CLA-100).
 # ──────────────────────────────────────────────────────────────────────
