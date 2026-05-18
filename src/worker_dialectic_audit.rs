@@ -56,6 +56,7 @@ pub async fn record_run_finish(
             finished_at = ?,
             candidates_reviewed = ?,
             decisions_count = ?,
+            actions_dispatched = ?,
             errors_count = ?,
             errors_summary = ?
          WHERE run_id = ?",
@@ -64,6 +65,7 @@ pub async fn record_run_finish(
         now.into(),
         (summary.candidates_reviewed as i32).into(),
         (summary.decisions_count as i32).into(),
+        (summary.actions_dispatched as i32).into(),
         (summary.errors.len() as i32).into(),
         errors_json.into(),
         run_id.into(),
@@ -73,11 +75,13 @@ pub async fn record_run_finish(
     Ok(())
 }
 
-/// Persist one dialectic judgment.
+/// Persist one dialectic judgment. Returns the generated `decision_id`
+/// so the caller (Stage 3 dispatcher) can update the same row with
+/// `dispatched_at` / `dispatch_status` / `dispatch_error`.
 ///
 /// Stage 1 callers set `assessment` + `rationale` and leave everything
-/// else `None`. Stage 2 will populate `transcript` + `resolution`.
-/// Stage 3 will populate `action` + `action_payload`.
+/// else `None`. Stage 2 populates `transcript` + `resolution` +
+/// `action` + `action_payload`. Stage 3 then dispatches on `action`.
 #[allow(clippy::too_many_arguments)]
 pub async fn record_decision(
     db: &D1Database,
@@ -89,7 +93,7 @@ pub async fn record_decision(
     resolution: Option<&str>,
     action: Option<&str>,
     action_payload: Option<&str>,
-) -> Result<()> {
+) -> Result<String> {
     let decision_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -100,7 +104,7 @@ pub async fn record_decision(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&[
-        decision_id.into(),
+        decision_id.clone().into(),
         run_id.into(),
         memory_id.into(),
         assessment.into(),
@@ -125,5 +129,5 @@ pub async fn record_decision(
     ])?
     .run()
     .await?;
-    Ok(())
+    Ok(decision_id)
 }

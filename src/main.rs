@@ -20,6 +20,8 @@ mod api_key;
 mod audit;
 mod auth;
 mod auth_ctx;
+#[allow(dead_code)]
+mod dialectic_validation;
 mod embed;
 mod key_rate;
 mod memory;
