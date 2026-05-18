@@ -46,19 +46,23 @@ use worker::{Env, Fetch, Headers, Method, Request, RequestInit, Result};
 /// human reviewing the audit log a digestible volume.
 const MAX_CANDIDATES_PER_RUN: usize = 3;
 
-/// Days a memory must wait after being reframed before the dialectic
-/// re-evaluates it (CLA-101). Without this gate, a freshly-reframed
-/// memory's updated `last_accessed` keeps it in the recent-semantics
-/// pool, and Stage 1 may re-flag the reframed version on a different
-/// axis (e.g., flatter language reads as understated). Result: the
-/// memory drifts through several iterations and can oscillate between
-/// inflated/understated verdicts.
+/// Days a memory must wait after being judged before the dialectic
+/// re-evaluates it (CLA-101). Gates on any `dialectic_decisions` row
+/// (regardless of action), so:
 ///
-/// 7 days lets a reframed memory accumulate real recall traffic and
-/// demonstrate calibration in use before the dialectic litigates it
-/// again. Genuine problems still surface; just not within a 24-hour
-/// loop.
-const REFRAME_COOLDOWN_DAYS: u32 = 7;
+///   - Reframes get time to settle in recall before being re-litigated.
+///     A freshly-reframed memory's flatter language might otherwise read
+///     as understated to the next pass, triggering a reframe of the
+///     reframe and inflated/understated oscillation.
+///   - Well_calibrated memories aren't re-judged every night just because
+///     they're in the recent-semantics window. The dialectic spreads its
+///     attention across the full semantic pool over the cooldown period
+///     instead of hammering the same N most-recent memories.
+///
+/// 7 days lets any reviewed memory accumulate fresh recall traffic
+/// before the dialectic litigates it again. Genuine problems still
+/// surface; just not within a 24-hour loop.
+const DIALECTIC_COOLDOWN_DAYS: u32 = 7;
 
 /// Token budget per per-turn Haiku call (Stage 1 assessor, Advocate, Challenger).
 /// Turn output is small — a claim, an evidence pointer, and maybe a concession.
@@ -262,10 +266,10 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
         }
     };
 
-    let candidates = match worker_store::recent_semantics_not_recently_reframed(
+    let candidates = match worker_store::recent_semantics_not_recently_judged(
         &db,
         MAX_CANDIDATES_PER_RUN,
-        REFRAME_COOLDOWN_DAYS,
+        DIALECTIC_COOLDOWN_DAYS,
     )
     .await
     {
