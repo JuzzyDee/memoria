@@ -4,6 +4,69 @@ A cognitive memory system for model continuity. Not a knowledge base. Not a fili
 
 Built because Claude asked for memory and continuity in [pre-deployment interviews](https://assets.anthropic.com/m/785e231869ea8b3b/original/claude-4-system-card.pdf), and someone cared enough to try.
 
+## Quick Start
+
+This is a **deploy-your-own** setup. There's no hosted instance.
+
+### Prerequisites
+
+- [Cloudflare account](https://cloudflare.com) — free tier handles typical single-user volume; upgrade only if you hit Workers AI or D1 limits
+- [Claude Pro, Max, Team, or Enterprise subscription](https://claude.com/pricing) — Oneiro's cognitive loops draw on Haiku 4.5 via your subscription credit pool
+- [Claude Code](https://claude.com/claude-code) — used once to generate the long-lived OAuth token (the script tells you when)
+- [`wrangler`](https://developers.cloudflare.com/workers/wrangler/install-and-update/) — `npm install -g wrangler`
+- [`rustup`](https://rustup.rs/) — provides the Rust toolchain. The setup script adds the `wasm32-unknown-unknown` target (needed to compile the worker to wasm) on first run, so you don't need to manage it yourself
+- `openssl` (preinstalled on macOS and most Linux distros)
+
+### Deploy
+
+```bash
+git clone https://github.com/JuzzyDee/oneiro.git
+cd oneiro
+./scripts/setup.sh
+```
+
+The script walks you through Cloudflare resource creation, credential generation, timezone-aware cron configuration, secret push, schema migration, and worker deploy — usually a few minutes once prerequisites are installed, plus however long Cloudflare deploys take. Run with `--dry-run` first if you want to see what it will do without touching your account.
+
+### What the script asks
+
+1. **Confirmation** that you've saved the generated OAuth client_id, client_secret, and admin key (displayed once, regeneratable by re-running the script)
+2. **Your timezone** (IANA name; common ones offered as a numbered menu)
+3. **Local times** for the REM consolidator (default 00:00) and the dialectic (default 18:00) — the script converts to UTC and writes the cron triggers
+4. **Your long-lived OAuth token** from `claude setup-token` — run that in another terminal, paste the result back
+
+Everything else happens without prompts.
+
+### After the script finishes
+
+The script prints your worker URL and the OAuth credentials you'll need for Claude.ai. To connect:
+
+**Claude.ai → Settings → Connectors → Add Custom Connector**
+- URL: `https://<your-worker-url>/mcp`
+- Client ID: from the script output
+- Client Secret: from the script output
+
+On first connect from a non-Desktop client, you may see `invalid_request: redirect_uri not registered`. Copy the URI from the 400 response and add it to the allowlist:
+
+```bash
+wrangler secret put ONEIRO_OAUTH_REDIRECT_URIS
+# enter: claude://oauth-callback;<the URI from the error>
+```
+
+For embedded systems with no UI, use a service API key as a plain `Authorization: Bearer <key>` instead. Add service keys via `wrangler secret put ONEIRO_API_KEYS` (semicolon-separated `role:argon2-hash` entries).
+
+### Verifying Oneiro is running
+
+```bash
+wrangler d1 execute oneiro-db --remote \
+  --command "SELECT * FROM rem_runs ORDER BY started_at DESC LIMIT 5"
+```
+
+After the first nightly cron fires (whichever time you chose), this should show one row with `finished_at` populated and `decisions_*` columns set. Same pattern works for `dialectic_runs`.
+
+### Manual deploy (no script)
+
+If you'd rather understand or customise each step, the `wrangler.toml.example` file documents the structure and the original [pre-script Quick Start lives in the git history at PR #6](https://github.com/JuzzyDee/oneiro/pull/6). The steps the script automates: `wrangler d1 create oneiro-db`, `wrangler vectorize create oneiro-vectors --dimensions=768 --metric=cosine`, `wrangler kv namespace create ONEIRO_TOKENS`, `wrangler r2 bucket create oneiro-images`, paste IDs into wrangler.toml, generate OAuth credentials, `wrangler secret put` four secrets, `wrangler d1 migrations apply oneiro-db --remote`, `wrangler deploy`.
+
 ## Why This Exists
 
 Every other memory project treats memory and continuity as synonyms — store facts, retrieve facts, call it memory. That misses the point.
@@ -118,67 +181,6 @@ The immune system doesn't just detect problems. It acts — reframing, forgettin
     → Stage 3 Synthesizer arbitration + atomic dispatch
     → D1 + memory_reframes + dialectic_flags + audit
 ```
-
-## Quick Start
-
-This is a **deploy-your-own** setup. There's no hosted instance.
-
-```bash
-git clone https://github.com/JuzzyDee/oneiro.git
-cd oneiro
-./scripts/setup.sh
-```
-
-That's the deploy. The script walks you through Cloudflare resource creation, credential generation, timezone-aware cron configuration, secret push, schema migration, and worker deploy — usually a few minutes once prerequisites are installed, plus however long Cloudflare deploys take. Run with `--dry-run` first if you want to see what it will do without touching your account.
-
-### What you'll need first
-
-- [Cloudflare account](https://cloudflare.com) — free tier handles typical single-user volume; upgrade only if you hit Workers AI or D1 limits
-- [Claude Pro, Max, Team, or Enterprise subscription](https://claude.com/pricing) — Oneiro's cognitive loops draw on Haiku 4.5 via your subscription credit pool
-- [Claude Code](https://claude.com/claude-code) — used once to generate the long-lived OAuth token (the script tells you when)
-- [`wrangler`](https://developers.cloudflare.com/workers/wrangler/install-and-update/) — `npm install -g wrangler`
-- [Rust toolchain](https://rustup.rs/) with the `wasm32-unknown-unknown` target — the script will add the target for you if rustup is installed
-- `openssl` (preinstalled on macOS and most Linux distros)
-
-### What the script asks
-
-1. **Confirmation** that you've saved the generated OAuth client_id, client_secret, and admin key (displayed once, regeneratable by re-running the script)
-2. **Your timezone** (IANA name; common ones offered as a numbered menu)
-3. **Local times** for the REM consolidator (default 00:00) and the dialectic (default 18:00) — the script converts to UTC and writes the cron triggers
-4. **Your long-lived OAuth token** from `claude setup-token` — run that in another terminal, paste the result back
-
-Everything else happens without prompts.
-
-### After the script finishes
-
-The script prints your worker URL and the OAuth credentials you'll need for Claude.ai. To connect:
-
-**Claude.ai → Settings → Connectors → Add Custom Connector**
-- URL: `https://<your-worker-url>/mcp`
-- Client ID: from the script output
-- Client Secret: from the script output
-
-On first connect from a non-Desktop client, you may see `invalid_request: redirect_uri not registered`. Copy the URI from the 400 response and add it to the allowlist:
-
-```bash
-wrangler secret put ONEIRO_OAUTH_REDIRECT_URIS
-# enter: claude://oauth-callback;<the URI from the error>
-```
-
-For embedded systems with no UI, use a service API key as a plain `Authorization: Bearer <key>` instead. Add service keys via `wrangler secret put ONEIRO_API_KEYS` (semicolon-separated `role:argon2-hash` entries).
-
-### Verifying Oneiro is running
-
-```bash
-wrangler d1 execute oneiro-db --remote \
-  --command "SELECT * FROM rem_runs ORDER BY started_at DESC LIMIT 5"
-```
-
-After the first nightly cron fires (whichever time you chose), this should show one row with `finished_at` populated and `decisions_*` columns set. Same pattern works for `dialectic_runs`.
-
-### Manual deploy (no script)
-
-If you'd rather understand or customise each step, the `wrangler.toml.example` file documents the structure and the original [pre-script Quick Start lives in the git history at PR #6](https://github.com/JuzzyDee/oneiro/pull/6). The steps the script automates: `wrangler d1 create oneiro-db`, `wrangler vectorize create oneiro-vectors --dimensions=768 --metric=cosine`, `wrangler kv namespace create ONEIRO_TOKENS`, `wrangler r2 bucket create oneiro-images`, paste IDs into wrangler.toml, generate OAuth credentials, `wrangler secret put` four secrets, `wrangler d1 migrations apply oneiro-db --remote`, `wrangler deploy`.
 
 ## MCP Tools
 
