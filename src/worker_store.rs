@@ -349,18 +349,44 @@ pub async fn recall_by_entity(
 /// place to catch inflation before it consolidates into the system's
 /// stable understanding. Stage 3 will replace this with a richer
 /// selection (skip recently-reviewed, weight by access count, etc.).
-pub async fn recent_semantics(db: &D1Database, limit: usize) -> Result<Vec<Memory>> {
+/// Recent semantic memories *excluding* those reframed within the last
+/// `cooldown_days`. Used by the dialectic as a candidate-selection gate
+/// to prevent runaway re-litigation of freshly-reframed memories (CLA-101).
+///
+/// A memory is excluded if any row in `memory_reframes` references it
+/// with a `reframed_at` more recent than `now - cooldown_days`. The
+/// cooldown clock resets with each reframe — a memory reframed twice
+/// waits the full cooldown from the second reframe before re-entering
+/// the pool.
+///
+/// `datetime(r.last_reframed_at)` normalises the RFC 3339 string we
+/// store into SQLite's native datetime format so the comparison against
+/// `datetime('now', ...)` is structural, not lexicographic. (Without it
+/// the `T` separator and timezone suffix in RFC 3339 don't compare
+/// cleanly against SQLite's default `YYYY-MM-DD HH:MM:SS`.)
+pub async fn recent_semantics_not_recently_reframed(
+    db: &D1Database,
+    limit: usize,
+    cooldown_days: u32,
+) -> Result<Vec<Memory>> {
     let rows: Vec<MemoryRow> = db
         .prepare(
-            "SELECT id, memory_type, content, summary, created_at, last_accessed,
-                    access_count, strength, stability, entity, tags, image_hash,
-                    image_mime, recorded_by
-             FROM memories
-             WHERE memory_type = 'semantic'
-             ORDER BY created_at DESC
+            "SELECT m.id, m.memory_type, m.content, m.summary, m.created_at,
+                    m.last_accessed, m.access_count, m.strength, m.stability,
+                    m.entity, m.tags, m.image_hash, m.image_mime, m.recorded_by
+             FROM memories m
+             LEFT JOIN (
+                 SELECT memory_id, MAX(reframed_at) AS last_reframed_at
+                 FROM memory_reframes
+                 GROUP BY memory_id
+             ) r ON m.id = r.memory_id
+             WHERE m.memory_type = 'semantic'
+               AND (r.last_reframed_at IS NULL
+                    OR datetime(r.last_reframed_at) < datetime('now', '-' || ? || ' days'))
+             ORDER BY m.created_at DESC
              LIMIT ?",
         )
-        .bind(&[(limit as u32).into()])?
+        .bind(&[cooldown_days.into(), (limit as u32).into()])?
         .all()
         .await?
         .results()?;
