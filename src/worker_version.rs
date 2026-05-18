@@ -1,7 +1,7 @@
 // worker_version.rs — Update notification via the recall response (CLA-102).
 //
 // Non-technical users won't read changelogs or watch GitHub releases.
-// Without an in-band prompt, every future Memoria release — security
+// Without an in-band prompt, every future Oneiro release — security
 // patches, dialectic-prompt refinements, new tools — depends on the
 // operator manually noticing it exists. The deployed worker becomes
 // a frozen artifact of whatever version got installed.
@@ -9,7 +9,7 @@
 // The leverage point: the Claude instance the user is talking to is
 // itself the most reliable update prompt. If recall returns an
 // `update_available` field, Claude will naturally surface it in the
-// conversation — "looks like there's a Memoria update, want me to
+// conversation — "looks like there's a Oneiro update, want me to
 // walk you through it?". The user gets prompted by the AI they're
 // already speaking with, which is the only update channel that
 // reliably reaches solo-dev-deployed software.
@@ -43,7 +43,7 @@ const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// repo root, served via GitHub raw. Updated as part of every release PR
 /// (dev → master) alongside the Cargo.toml version bump.
 const VERSION_URL: &str =
-    "https://raw.githubusercontent.com/JuzzyDee/memoria/master/VERSION.json";
+    "https://raw.githubusercontent.com/JuzzyDee/oneiro/master/VERSION.json";
 
 /// KV key for the cached remote version. We only ever have one entry, so
 /// a fixed key is fine — namespace isolation is the binding.

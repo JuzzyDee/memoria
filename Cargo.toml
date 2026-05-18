@@ -1,5 +1,5 @@
 [package]
-name = "memoria"
+name = "oneiro"
 version = "0.1.0"
 edition = "2024"
 description = "Cognitive memory system for model continuity"
@@ -9,16 +9,16 @@ license = "MIT"
 # wasm-bindgen needs; `rlib` keeps it linkable from the bin targets so
 # we can share types during the transition.
 [lib]
-name = "memoria"
+name = "oneiro"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "memoria"
+name = "oneiro"
 path = "src/main.rs"
 
 [[bin]]
-name = "memoria-rem"
+name = "oneiro-rem"
 path = "src/rem.rs"
 
 # ──────────────────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ base64 = "0.22"
 tracing = "0.1"
 
 # ──────────────────────────────────────────────────────────────────────
-# Wasm32 (Cloudflare Workers) — the new target for memoria's MCP surface.
+# Wasm32 (Cloudflare Workers) — the new target for oneiro's MCP surface.
 # ──────────────────────────────────────────────────────────────────────
 [target.'cfg(target_family = "wasm")'.dependencies]
 worker = { version = "0.8", features = ["d1"] }
@@ -91,8 +91,8 @@ tokio = { version = "1", default-features = false, features = ["sync", "macros",
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 # ──────────────────────────────────────────────────────────────────────
-# Native — the existing local-server stack. Keeps `memoria` (MCP server
-# bin) and `memoria-rem` (consolidator bin) buildable during the
+# Native — the existing local-server stack. Keeps `oneiro` (MCP server
+# bin) and `oneiro-rem` (consolidator bin) buildable during the
 # migration. main.rs and friends keep using these until the worker
 # implementation reaches feature parity (phase 6+) and the local bin
 # is retired in favour of `wrangler deploy`.

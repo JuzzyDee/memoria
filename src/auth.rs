@@ -1,4 +1,4 @@
-// auth.rs — OAuth 2.1 server-side authentication for Memoria
+// auth.rs — OAuth 2.1 server-side authentication for Oneiro
 //
 // Implements the minimum OAuth flow required by the MCP spec:
 // - Protected Resource Metadata discovery (RFC 9728)
@@ -7,7 +7,7 @@
 // - Bearer token validation on MCP requests
 //
 // Single-user design: one client_id, one hashed secret, one token.
-// Credentials are generated on first run and stored in ~/.memoria/auth.json.
+// Credentials are generated on first run and stored in ~/.oneiro/auth.json.
 // The secret is shown once and never stored in plaintext.
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
@@ -51,7 +51,7 @@ pub struct AuthState {
     active_tokens: Arc<RwLock<Vec<ActiveToken>>>,
     pending_codes: Arc<RwLock<Vec<PendingCode>>>,
     token_secret: Arc<Vec<u8>>, // HMAC key for token generation
-    /// Configured service API keys (loaded from MEMORIA_API_KEYS env at
+    /// Configured service API keys (loaded from ONEIRO_API_KEYS env at
     /// startup). Empty unless service-key auth is configured. See
     /// [`crate::api_key`] for the security design.
     api_keys: Arc<Vec<api_key::ApiKeyEntry>>,
@@ -85,7 +85,7 @@ impl AuthState {
                 .map_err(|e| format!("Failed to parse auth.json: {}", e))?
         } else {
             // Generate new credentials
-            let client_id = format!("memoria-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            let client_id = format!("oneiro-{}", &uuid::Uuid::new_v4().to_string()[..8]);
             let client_secret = generate_secret();
 
             // Hash the secret
@@ -111,7 +111,7 @@ impl AuthState {
 
             // Print secret — shown once, never again
             eprintln!("╔══════════════════════════════════════════════════╗");
-            eprintln!("║         MEMORIA - NEW CREDENTIALS GENERATED     ║");
+            eprintln!("║         ONEIRO - NEW CREDENTIALS GENERATED     ║");
             eprintln!("╠══════════════════════════════════════════════════╣");
             eprintln!("║ Client ID:     {:<33} ║", client_id);
             eprintln!("║ Client Secret: {:<33} ║", client_secret);
@@ -136,10 +136,10 @@ impl AuthState {
         };
 
         let api_keys = api_key::load_from_env()
-            .map_err(|e| format!("Failed to load MEMORIA_API_KEYS: {}", e))?;
+            .map_err(|e| format!("Failed to load ONEIRO_API_KEYS: {}", e))?;
         if !api_keys.is_empty() {
             tracing::info!(
-                "Loaded {} service API key(s) from MEMORIA_API_KEYS",
+                "Loaded {} service API key(s) from ONEIRO_API_KEYS",
                 api_keys.len()
             );
         }
@@ -343,7 +343,7 @@ pub fn resource_metadata_json(base_url: &str) -> serde_json::Value {
     serde_json::json!({
         "resource": base_url,
         "authorization_servers": [base_url],
-        "scopes_supported": ["memoria"]
+        "scopes_supported": ["oneiro"]
     })
 }
 
@@ -359,7 +359,7 @@ pub fn authorize_page_html(
         r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>Memoria — Authorize</title>
+    <title>Oneiro — Authorize</title>
     <style>
         body {{ font-family: system-ui; max-width: 400px; margin: 80px auto; padding: 20px;
                background: #1a1a1a; color: #e0e0e0; }}
@@ -372,7 +372,7 @@ pub fn authorize_page_html(
     </style>
 </head>
 <body>
-    <h1>Authorize Claude to access Memoria</h1>
+    <h1>Authorize Claude to access Oneiro</h1>
     <div class="info">
         <p>Client: {client_id}</p>
         <p>Scope: {scope}</p>
@@ -398,7 +398,7 @@ pub fn auth_server_metadata_json(base_url: &str) -> serde_json::Value {
         "token_endpoint": format!("{}/token", base_url),
         "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
         "grant_types_supported": ["authorization_code", "client_credentials"],
-        "scopes_supported": ["memoria"],
+        "scopes_supported": ["oneiro"],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"]
     })
@@ -420,7 +420,7 @@ mod tests {
 
         // We can't test the full flow without knowing the secret (it was printed to stderr)
         // But we can verify the structure exists
-        assert!(creds.client_id.starts_with("memoria-"));
+        assert!(creds.client_id.starts_with("oneiro-"));
         assert!(!creds.client_secret_hash.is_empty());
         assert!(dir.path().join("token.key").exists());
 

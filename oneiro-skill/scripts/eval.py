@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Memoria Skill Eval Suite
+Oneiro Skill Eval Suite
 
-Tests that Claude correctly uses Memoria tools when the skill is loaded.
+Tests that Claude correctly uses Oneiro tools when the skill is loaded.
 Runs via `claude -p` with the skill directory mounted.
 
 Usage:
@@ -63,10 +63,10 @@ def tool_was_called(output: dict, tool_name: str) -> bool:
                 return True
         # Also check nested content
         content = msg.get("content", "")
-        if isinstance(content, str) and f"memoria__{tool_name}" in content:
+        if isinstance(content, str) and f"oneiro__{tool_name}" in content:
             return True
     # Fallback: check raw output for tool name
-    return f"memoria__{tool_name}" in raw or f"memoria:{tool_name}" in raw
+    return f"oneiro__{tool_name}" in raw or f"oneiro:{tool_name}" in raw
 
 
 def get_tool_params(output: dict, tool_name: str) -> dict:
@@ -156,7 +156,7 @@ def eval_correct_type_event() -> EvalResult:
 
 def run_all():
     """Run all evals and report results."""
-    print("═══ Memoria Skill Eval Suite ═══")
+    print("═══ Oneiro Skill Eval Suite ═══")
     print()
 
     tests = [

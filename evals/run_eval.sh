@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_eval.sh — Run a single Memoria eval test
+# run_eval.sh — Run a single Oneiro eval test
 #
 # Usage: ./run_eval.sh "prompt text" "expected_tool" "pass_description"
 #
@@ -19,8 +19,8 @@ if [ -z "$PROMPT" ] || [ -z "$EXPECTED_TOOL" ]; then
     exit 1
 fi
 
-# Prepend system context so the model knows to use Memoria
-FULL_PROMPT="You have access to Memoria, your cognitive memory system. At the START of every conversation, call recall with a brief context. During conversation, use remember when something matters. At the END, use reflect. The user says: $PROMPT"
+# Prepend system context so the model knows to use Oneiro
+FULL_PROMPT="You have access to Oneiro, your cognitive memory system. At the START of every conversation, call recall with a brief context. During conversation, use remember when something matters. At the END, use reflect. The user says: $PROMPT"
 
 # Run Claude with the prompt and capture tool call output via verbose mode
 OUTPUT=$(claude -p "$FULL_PROMPT" \
@@ -35,7 +35,7 @@ if [[ "$EXPECTED_TOOL" == !* ]]; then
     TOOL="${EXPECTED_TOOL:1}"
 fi
 
-TOOL_FOUND=$(echo "$OUTPUT" | grep -c "mcp__memoria__${TOOL}" || true)
+TOOL_FOUND=$(echo "$OUTPUT" | grep -c "mcp__oneiro__${TOOL}" || true)
 
 if [ "$NEGATE" = true ]; then
     if [ "$TOOL_FOUND" -eq 0 ]; then
@@ -57,7 +57,7 @@ fi
 
 # Show tool calls for inspection
 echo "   Tool calls:"
-echo "$OUTPUT" | grep -o "mcp__memoria__[a-z]*" | sort | uniq -c | while read count tool; do
+echo "$OUTPUT" | grep -o "mcp__oneiro__[a-z]*" | sort | uniq -c | while read count tool; do
     echo "     $tool ($count)"
 done
 echo ""

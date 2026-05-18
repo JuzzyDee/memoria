@@ -230,7 +230,7 @@ pub struct RunSummary {
     /// How many decision rows the Stage 3 dispatcher acted on (counts
     /// success, dry_run, and soft-failure status alike — any row where
     /// `mark_dispatched` set `dispatched_at`). Skipped when
-    /// `MEMORIA_DIALECTIC_DISPATCH=off`.
+    /// `ONEIRO_DIALECTIC_DISPATCH=off`.
     pub actions_dispatched: usize,
     pub errors: Vec<String>,
 }
@@ -247,7 +247,7 @@ pub struct RunSummary {
 ///   5. Otherwise → run dialogue (Advocate vs Challenger) + Synthesizer,
 ///      then record the full decision row.
 ///   6. Stage 3 dispatcher acts on the recorded row (reframe / flag / keep)
-///      unless `MEMORIA_DIALECTIC_DISPATCH` is `off`. Dispatch outcome
+///      unless `ONEIRO_DIALECTIC_DISPATCH` is `off`. Dispatch outcome
 ///      writes back to the same row's `dispatched_at` /
 ///      `dispatch_status` / `dispatch_error` columns.
 ///   7. Close audit row.

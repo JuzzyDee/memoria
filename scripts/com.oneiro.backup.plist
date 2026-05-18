@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.memoria.backup</string>
+    <string>com.oneiro.backup</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/justindavis/memoria/bin/backup.sh</string>
+        <string>/Users/justindavis/oneiro/bin/backup.sh</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -16,9 +16,9 @@
         <integer>0</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/justindavis/memoria/logs/backup.log</string>
+    <string>/Users/justindavis/oneiro/logs/backup.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/justindavis/memoria/logs/backup.log</string>
+    <string>/Users/justindavis/oneiro/logs/backup.log</string>
     <key>RunAtLoad</key>
     <false/>
 </dict>

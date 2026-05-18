@@ -1,4 +1,4 @@
-// memory.rs — Universal type definitions for memoria.
+// memory.rs — Universal type definitions for oneiro.
 //
 // Lives outside store.rs so the wasm32 worker side (worker_store.rs) and
 // the native rusqlite side (store.rs) can share the same `Memory` and

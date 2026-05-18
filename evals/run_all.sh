@@ -1,8 +1,8 @@
 #!/bin/bash
-# run_all.sh — Run the core Memoria eval suite
+# run_all.sh — Run the core Oneiro eval suite
 #
-# Tests that the model correctly follows Memoria's server instructions.
-# Run from the memoria project directory.
+# Tests that the model correctly follows Oneiro's server instructions.
+# Run from the oneiro project directory.
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 PASS=0
@@ -20,7 +20,7 @@ run_test() {
     fi
 }
 
-echo "═══ Memoria Eval Suite ═══"
+echo "═══ Oneiro Eval Suite ═══"
 echo "Testing model compliance with server instructions"
 echo ""
 
