@@ -54,6 +54,10 @@ wrangler secret put ONEIRO_OAUTH_REDIRECT_URIS
 
 For embedded systems with no UI, use a service API key as a plain `Authorization: Bearer <key>` instead. Add service keys via `wrangler secret put ONEIRO_API_KEYS` (semicolon-separated `role:argon2-hash` entries).
 
+### Install the skill (recommended)
+
+Drag `oneiro-skill/oneiro-skill.zip` into Claude.ai → Settings → Skills. This loads progressive-disclosure usage guidance — when to remember, when to reframe, when to let go — so Claude develops calibrated memory habits across instances. Without the skill the tools still work, but instances may diverge on what's worth keeping.
+
 ### Verifying Oneiro is running
 
 ```bash
