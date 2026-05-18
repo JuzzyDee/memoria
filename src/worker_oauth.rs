@@ -123,10 +123,21 @@ async fn read_client_creds(env: &Env) -> Result<(String, String)> {
 }
 
 /// Default redirect URIs accepted when `ONEIRO_OAUTH_REDIRECT_URIS` is
-/// unset. Covers the canonical Claude desktop callback scheme. Override
-/// via wrangler secret when deploying behind a different client (or to
-/// add localhost dev callbacks during integration).
-const DEFAULT_ALLOWED_REDIRECT_URIS: &[&str] = &["claude://oauth-callback"];
+/// unset. Covers the two canonical Anthropic callback destinations:
+///
+///   - `claude://oauth-callback`                 — Claude Desktop
+///   - `https://claude.ai/api/mcp/auth_callback` — Claude.ai web (the path
+///                                                 setup.sh tells users to
+///                                                 use for connector setup)
+///
+/// Both are first-party Anthropic endpoints; defaulting to both means a
+/// fresh deploy works for either client without operator intervention.
+/// Override via `ONEIRO_OAUTH_REDIRECT_URIS` secret to add custom
+/// callbacks (localhost dev, alternate client implementations).
+const DEFAULT_ALLOWED_REDIRECT_URIS: &[&str] = &[
+    "claude://oauth-callback",
+    "https://claude.ai/api/mcp/auth_callback",
+];
 
 /// Read the redirect_uri allowlist. Order of precedence:
 ///   1. `ONEIRO_OAUTH_REDIRECT_URIS` secret — semicolon-separated, e.g.
@@ -356,7 +367,10 @@ pub async fn handle_authorize_post(
     // (consent page render) and /token (code exchange) for defence in
     // depth — any one of the three rejecting is enough.
     if !is_registered_redirect_uri(env, &redirect_uri).await {
-        return Response::error("invalid_request: redirect_uri not registered", 400);
+        return Response::error(
+            format!("invalid_request: redirect_uri not registered: {}", redirect_uri),
+            400,
+        );
     }
 
     let code = generate_code();
@@ -450,7 +464,11 @@ async fn exchange_code(
     // code outlives a tightening of ONEIRO_OAUTH_REDIRECT_URIS, or where
     // a pre-Fix-2 deploy created codes with redirect_uris we'd now reject.
     if !is_registered_redirect_uri(env, &pending.redirect_uri).await {
-        return token_error("invalid_grant", "redirect_uri not registered", 400);
+        return token_error(
+            "invalid_grant",
+            &format!("redirect_uri not registered: {}", pending.redirect_uri),
+            400,
+        );
     }
     // (PKCE verification could go here in a follow-up.)
 

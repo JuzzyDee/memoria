@@ -117,7 +117,14 @@ async fn render_consent_page(env: &Env, req: &Request) -> Result<Response> {
     };
     let redirect_uri = q("redirect_uri");
     if !worker_oauth::is_registered_redirect_uri(env, &redirect_uri).await {
-        return Response::error("invalid_request: redirect_uri not registered", 400);
+        // Include the offending URI in the response body so the operator
+        // can copy it directly into ONEIRO_OAUTH_REDIRECT_URIS without
+        // having to dig it out of logs or guess at form-encoded params.
+        // (Setup script's troubleshooting hint relies on this text.)
+        return Response::error(
+            format!("invalid_request: redirect_uri not registered: {}", redirect_uri),
+            400,
+        );
     }
     worker_oauth::render_authorize_page(
         &q("client_id"),
