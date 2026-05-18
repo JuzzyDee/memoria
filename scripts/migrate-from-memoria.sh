@@ -332,20 +332,27 @@ else
             # batch contains any IDs that don't have vectors — even if
             # the rest of the batch returned valid data on stdout.
             # Treating that exit as fatal would skip whole batches over
-            # one or two missing vectors. Instead: capture stdout, try
-            # to parse as JSON, and use what's there. Only escalate to
-            # a true failure if the JSON itself doesn't parse.
+            # one or two missing vectors. Instead: capture stdout to a
+            # file (variable expansion mangles ~80KB JSON with embedded
+            # special chars), try to parse, use what's there.
+            VEC_OUT="$TMPDIR/vec-batch-${BATCH}.json"
             VEC_ERR="$TMPDIR/vec-batch-${BATCH}.err"
-            VEC_JSON=$(wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids "${IDS_ARR[@]}" 2>"$VEC_ERR" || true)
+            wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids "${IDS_ARR[@]}" \
+                > "$VEC_OUT" 2>"$VEC_ERR" || true
 
             # Transform to NDJSON for vectorize insert. Each line:
             #   {"id":"...","values":[...],"metadata":{...}}
-            # jq guaranteed by preflight. `?` on the array iteration
-            # makes jq quietly emit nothing for non-array input
-            # (e.g., empty output) rather than erroring.
-            if ! echo "$VEC_JSON" | jq -c '.[]? | {id, values, metadata}' > "$TMPDIR/batch.ndjson" 2>/dev/null; then
-                warn "Batch $BATCH: get-vectors output not parseable as JSON:"
-                head -10 "$VEC_ERR" | sed 's/^/      /' >&2
+            # `.[]?` makes jq quietly emit nothing for non-array input.
+            # Capture jq's stderr so a parse failure tells us WHAT it
+            # didn't like — previously we suppressed it with 2>/dev/null
+            # and got a useless "not parseable" warning.
+            JQ_ERR="$TMPDIR/jq-batch-${BATCH}.err"
+            if ! jq -c '.[]? | {id, values, metadata}' "$VEC_OUT" \
+                > "$TMPDIR/batch.ndjson" 2>"$JQ_ERR"; then
+                warn "Batch $BATCH: jq failed to parse get-vectors output:"
+                head -5 "$JQ_ERR" | sed 's/^/      [jq] /' >&2
+                head -c 300 "$VEC_OUT" | sed 's/^/      [stdout] /' >&2
+                printf '\n' >&2
                 continue
             fi
 
