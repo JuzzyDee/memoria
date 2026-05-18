@@ -49,7 +49,12 @@ DRY_RUN=false
 SKIP_D1=false
 SKIP_VECTORS=false
 SKIP_R2=false
-VECTORIZE_BATCH=100
+# Vectorize's get-vectors API caps the request at 20 IDs (CF limit;
+# empirically: "max id count is 20"). Match that ceiling exactly —
+# anything higher gets rejected before the request even reaches the
+# index. 500 memories ÷ 20 = 25 batches, each still completing in well
+# under a second.
+VECTORIZE_BATCH=20
 
 usage() {
     cat <<EOF
