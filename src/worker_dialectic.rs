@@ -46,6 +46,20 @@ use worker::{Env, Fetch, Headers, Method, Request, RequestInit, Result};
 /// human reviewing the audit log a digestible volume.
 const MAX_CANDIDATES_PER_RUN: usize = 3;
 
+/// Days a memory must wait after being reframed before the dialectic
+/// re-evaluates it (CLA-101). Without this gate, a freshly-reframed
+/// memory's updated `last_accessed` keeps it in the recent-semantics
+/// pool, and Stage 1 may re-flag the reframed version on a different
+/// axis (e.g., flatter language reads as understated). Result: the
+/// memory drifts through several iterations and can oscillate between
+/// inflated/understated verdicts.
+///
+/// 7 days lets a reframed memory accumulate real recall traffic and
+/// demonstrate calibration in use before the dialectic litigates it
+/// again. Genuine problems still surface; just not within a 24-hour
+/// loop.
+const REFRAME_COOLDOWN_DAYS: u32 = 7;
+
 /// Token budget per per-turn Haiku call (Stage 1 assessor, Advocate, Challenger).
 /// Turn output is small — a claim, an evidence pointer, and maybe a concession.
 const MAX_TOKENS_PER_CALL: u32 = 1024;
@@ -248,7 +262,13 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
         }
     };
 
-    let candidates = match worker_store::recent_semantics(&db, MAX_CANDIDATES_PER_RUN).await {
+    let candidates = match worker_store::recent_semantics_not_recently_reframed(
+        &db,
+        MAX_CANDIDATES_PER_RUN,
+        REFRAME_COOLDOWN_DAYS,
+    )
+    .await
+    {
         Ok(c) => c,
         Err(e) => {
             summary
