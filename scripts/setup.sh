@@ -497,6 +497,14 @@ ok "MEMORIA_ADMIN_KEY"
 push_secret "CLAUDE_CODE_OAUTH_TOKEN" "$OAUTH_TOKEN"
 ok "CLAUDE_CODE_OAUTH_TOKEN"
 
+# Stage 3 dispatcher mode. The worker defaults to dry_run when this is
+# missing — that's a fail-safe for in-place operator deploys (burn-in
+# observation period before flipping live). Fresh consumer deployments
+# via setup.sh don't want that — they want a working dialectic out of
+# the box, not silent audit rows that never act on anything.
+push_secret "MEMORIA_DIALECTIC_DISPATCH" "on"
+ok "MEMORIA_DIALECTIC_DISPATCH (on — dialectic dispatches reframes/flags live)"
+
 # ──── Step 7: Apply migrations ───────────────────────────────────────
 
 header "[7/8] Applying database migrations"
