@@ -224,10 +224,23 @@ else
         # this script prepended `OR IGNORE` to every INSERT, which is
         # syntactically incompatible with the trailing ON CONFLICT clause
         # — SQLite rejected the import at offset 5 of the first INSERT.
+        #
+        # We also drop INSERTs into D1's internal bookkeeping tables.
+        # `d1_migrations` is Cloudflare's own migration-tracking table
+        # — setup.sh applied the schema migrations to the dest already,
+        # so dest has its own rows. Re-inserting source's rows hits a
+        # plain PK conflict (no ON CONFLICT clause on the internal
+        # tables) and rolls back the whole import. `sqlite_sequence`
+        # is for AUTOINCREMENT counters (we don't use any, but if a
+        # future migration adds one, we'd still want the dest's
+        # sequence state, not the source's).
         sed -E \
             -e '/^CREATE TABLE/,/);$/d' \
             -e '/^CREATE INDEX/d' \
             -e '/^CREATE UNIQUE INDEX/d' \
+            -e '/^INSERT INTO d1_migrations/d' \
+            -e '/^INSERT INTO sqlite_sequence/d' \
+            -e '/^INSERT INTO "_cf/d' \
             "$DUMP_FILE" > "$DATA_FILE"
         INSERTS=$(grep -c "^INSERT" "$DATA_FILE" || true)
         ok "Transformed: $INSERTS INSERT statements ready"
