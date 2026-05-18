@@ -306,8 +306,21 @@ else
             tail -n "+$((VECTORIZE_BATCH + 1))" "$TMPDIR/ids.txt" > "$TMPDIR/ids.next" && mv "$TMPDIR/ids.next" "$TMPDIR/ids.txt"
 
             BATCH=$((BATCH + 1))
-            IDS_CSV=$(paste -sd, "$TMPDIR/batch.txt")
             BATCH_COUNT=$(wc -l < "$TMPDIR/batch.txt" | tr -d ' ')
+
+            # Build an argv array of IDs. wrangler's `--ids` flag is an
+            # array type (yargs convention) — it accepts multiple values
+            # as separate arguments, NOT as a single comma-separated
+            # value. Passing `--ids=<csv>` was treating the entire CSV
+            # string as one ID and triggering the API's 64-byte id limit
+            # ("id too long; max is 64 bytes, got 3559 bytes").
+            #
+            # Loop instead of mapfile so this works on bash 3.2 (macOS
+            # default) — mapfile is bash 4+.
+            IDS_ARR=()
+            while IFS= read -r id; do
+                [ -n "$id" ] && IDS_ARR+=("$id")
+            done < "$TMPDIR/batch.txt"
 
             # Get vectors from source as JSON. wrangler emits a WARNING
             # (yellow triangle ▲) and a non-zero exit code when the
@@ -318,7 +331,7 @@ else
             # to parse as JSON, and use what's there. Only escalate to
             # a true failure if the JSON itself doesn't parse.
             VEC_ERR="$TMPDIR/vec-batch-${BATCH}.err"
-            VEC_JSON=$(wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids="$IDS_CSV" 2>"$VEC_ERR" || true)
+            VEC_JSON=$(wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids "${IDS_ARR[@]}" 2>"$VEC_ERR" || true)
 
             # Transform to NDJSON for vectorize insert. Each line:
             #   {"id":"...","values":[...],"metadata":{...}}
