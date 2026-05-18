@@ -105,7 +105,7 @@ pub async fn check_for_update(env: &Env) -> Result<Option<UpdateAvailable>> {
         }
     };
 
-    if remote.latest_version == CURRENT_VERSION {
+    if !is_remote_newer(CURRENT_VERSION, &remote.latest_version) {
         return Ok(None);
     }
 
@@ -114,6 +114,33 @@ pub async fn check_for_update(env: &Env) -> Result<Option<UpdateAvailable>> {
         latest: remote.latest_version,
         url: remote.release_notes_url,
     }))
+}
+
+/// Compare two version strings, returning true only when `latest` is a
+/// genuinely later release than `current`. Prevents the "any mismatch =
+/// update available" footgun — a worker built from `0.2.0-dev` against
+/// a release tag of `0.1.0` should not prompt the user to "update" to
+/// an older version.
+///
+/// Parses major.minor.patch with optional `v` prefix and ignores any
+/// pre-release suffix (`-dev`, `-rc1`, etc.). For malformed versions we
+/// fall back to plain inequality to preserve the "something's off, tell
+/// the user" behaviour rather than silently saying everything is fine.
+fn is_remote_newer(current: &str, latest: &str) -> bool {
+    fn parse(v: &str) -> Option<(u64, u64, u64)> {
+        let core = v.trim().trim_start_matches('v').split('-').next()?;
+        let mut parts = core.split('.');
+        Some((
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        ))
+    }
+
+    match (parse(current), parse(latest)) {
+        (Some(c), Some(l)) => l > c,
+        _ => latest != current,
+    }
 }
 
 // ──── Cache + fetch plumbing ───────────────────────────────────────────
