@@ -297,21 +297,27 @@ else
             IDS_CSV=$(paste -sd, "$TMPDIR/batch.txt")
             BATCH_COUNT=$(wc -l < "$TMPDIR/batch.txt" | tr -d ' ')
 
-            # Get vectors from source as JSON. Capture stderr to a per-batch
-            # log so failures surface inline — earlier we swallowed stderr
-            # with `2>/dev/null` and got silent "0 vectors copied"
-            # outcomes with no diagnostic.
+            # Get vectors from source as JSON. wrangler emits a WARNING
+            # (yellow triangle ▲) and a non-zero exit code when the
+            # batch contains any IDs that don't have vectors — even if
+            # the rest of the batch returned valid data on stdout.
+            # Treating that exit as fatal would skip whole batches over
+            # one or two missing vectors. Instead: capture stdout, try
+            # to parse as JSON, and use what's there. Only escalate to
+            # a true failure if the JSON itself doesn't parse.
             VEC_ERR="$TMPDIR/vec-batch-${BATCH}.err"
-            if ! VEC_JSON=$(wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids="$IDS_CSV" 2>"$VEC_ERR"); then
-                warn "Batch $BATCH: get-vectors from $SOURCE_VECTORS failed:"
-                head -10 "$VEC_ERR" | sed 's/^/      /' >&2
-                continue
-            fi
+            VEC_JSON=$(wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids="$IDS_CSV" 2>"$VEC_ERR" || true)
 
             # Transform to NDJSON for vectorize insert. Each line:
             #   {"id":"...","values":[...],"metadata":{...}}
-            # jq guaranteed by preflight.
-            echo "$VEC_JSON" | jq -c '.[] | {id, values, metadata}' > "$TMPDIR/batch.ndjson"
+            # jq guaranteed by preflight. `?` on the array iteration
+            # makes jq quietly emit nothing for non-array input
+            # (e.g., empty output) rather than erroring.
+            if ! echo "$VEC_JSON" | jq -c '.[]? | {id, values, metadata}' > "$TMPDIR/batch.ndjson" 2>/dev/null; then
+                warn "Batch $BATCH: get-vectors output not parseable as JSON:"
+                head -10 "$VEC_ERR" | sed 's/^/      /' >&2
+                continue
+            fi
 
             VECS_IN_BATCH=$(wc -l < "$TMPDIR/batch.ndjson" | tr -d ' ')
             if [ "$VECS_IN_BATCH" -eq 0 ]; then
@@ -341,40 +347,51 @@ if $SKIP_R2; then
 else
     header "[4/4] R2 migration"
 
-    say "  Listing objects in ${SOURCE_IMAGES}..."
+    # wrangler doesn't have a `r2 object list` subcommand (only get/put/
+    # delete — known gap on the wrangler side). Instead of fighting the
+    # CLI, we use D1 as the source of truth for which images exist:
+    # every image stored has a row in `memories` with image_hash +
+    # image_mime, and the R2 key is `{hash}.{ext}` per the convention in
+    # worker_store::store_image_to_r2. Querying D1 also has the nice
+    # property of only migrating images actually referenced by memories —
+    # any orphan R2 objects from earlier failed writes get left behind
+    # (correct semantics; orphans don't matter for Oneiro's operation).
+    say "  Querying ${DEST_DB} for image references..."
     if $DRY_RUN; then
-        dim "[dry-run] would list + copy each object key"
+        dim "[dry-run] would query D1 for image_hash + image_mime, copy each"
         KEY_COUNT=0
     else
-        R2_LIST_ERR="$TMPDIR/r2-list.err"
-        if ! R2_LIST=$(wrangler r2 object list "$SOURCE_IMAGES" --remote 2>"$R2_LIST_ERR"); then
-            warn "Couldn't list ${SOURCE_IMAGES}:"
-            head -10 "$R2_LIST_ERR" | sed 's/^/      /' >&2
+        IMG_ERR="$TMPDIR/img-query.err"
+        IMG_JSON=$(wrangler d1 execute "$DEST_DB" --remote --json \
+            --command="SELECT DISTINCT image_hash, image_mime FROM memories WHERE image_hash IS NOT NULL" \
+            2>"$IMG_ERR" || true)
+        # Parse to lines of "hash mime" — jq guaranteed by preflight.
+        if ! echo "$IMG_JSON" | jq -r '.[0].results[]? | "\(.image_hash) \(.image_mime)"' \
+            > "$TMPDIR/r2-images.txt" 2>/dev/null; then
+            warn "Couldn't extract image references from ${DEST_DB}:"
+            head -10 "$IMG_ERR" | sed 's/^/      /' >&2
             warn "Skipping R2 stage."
             KEY_COUNT=0
         else
-            # wrangler r2 object list output format varies by version. Try
-            # JSON parse first; fall back to whitespace parse.
-            if command -v jq >/dev/null 2>&1; then
-                echo "$R2_LIST" | jq -r '.[]?.key // empty' > "$TMPDIR/r2-keys.txt" 2>/dev/null || \
-                    echo "$R2_LIST" | awk 'NR>1 {print $1}' > "$TMPDIR/r2-keys.txt"
-            else
-                echo "$R2_LIST" | awk 'NR>1 {print $1}' > "$TMPDIR/r2-keys.txt"
-            fi
-            # Filter out blank/header lines
-            grep -E '\.(jpg|jpeg|png|webp)$' "$TMPDIR/r2-keys.txt" > "$TMPDIR/r2-keys.filtered" || true
-            mv "$TMPDIR/r2-keys.filtered" "$TMPDIR/r2-keys.txt"
-            KEY_COUNT=$(wc -l < "$TMPDIR/r2-keys.txt" | tr -d ' ')
-            ok "Found $KEY_COUNT image keys"
+            KEY_COUNT=$(wc -l < "$TMPDIR/r2-images.txt" | tr -d ' ')
+            ok "Found $KEY_COUNT image references in D1"
         fi
     fi
 
     if [ "$KEY_COUNT" -gt 0 ] && ! $DRY_RUN; then
-        say "  Copying objects (this can take a while for large buckets)..."
+        say "  Copying objects (this can take a while for many images)..."
         COPIED=0
         FAILED=0
-        while IFS= read -r KEY; do
-            [ -z "$KEY" ] && continue
+        while IFS=' ' read -r HASH MIME; do
+            [ -z "$HASH" ] && continue
+            # Map MIME to extension — matches worker_store::mime_to_ext.
+            case "$MIME" in
+                "image/png")  EXT="png" ;;
+                "image/jpeg") EXT="jpg" ;;
+                "image/webp") EXT="webp" ;;
+                *)            EXT="bin" ;;
+            esac
+            KEY="${HASH}.${EXT}"
             TMP_OBJ="$TMPDIR/obj-$$"
             if wrangler r2 object get "$SOURCE_IMAGES/$KEY" --remote --file="$TMP_OBJ" >/dev/null 2>&1 && \
                wrangler r2 object put "$DEST_IMAGES/$KEY" --remote --file="$TMP_OBJ" >/dev/null 2>&1; then
@@ -387,7 +404,7 @@ else
             if [ $((COPIED % 10)) -eq 0 ] && [ "$COPIED" -gt 0 ]; then
                 dim "  copied $COPIED / $KEY_COUNT"
             fi
-        done < "$TMPDIR/r2-keys.txt"
+        done < "$TMPDIR/r2-images.txt"
         ok "R2 migration: $COPIED copied, $FAILED failed"
     fi
 fi
