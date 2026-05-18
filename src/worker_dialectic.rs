@@ -33,7 +33,7 @@
 #![cfg(target_family = "wasm")]
 
 use crate::memory::Memory;
-use crate::{worker_dialectic_audit, worker_store};
+use crate::{worker_dialectic_audit, worker_dialectic_dispatch, worker_store};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::{Env, Fetch, Headers, Method, Request, RequestInit, Result};
@@ -209,6 +209,11 @@ pub struct RunSummary {
     /// corresponding decision-row delta — use the audit table as ground
     /// truth, not this counter.
     pub dialogues_run: usize,
+    /// How many decision rows the Stage 3 dispatcher acted on (counts
+    /// success, dry_run, and soft-failure status alike — any row where
+    /// `mark_dispatched` set `dispatched_at`). Skipped when
+    /// `MEMORIA_DIALECTIC_DISPATCH=off`.
+    pub actions_dispatched: usize,
     pub errors: Vec<String>,
 }
 
@@ -223,11 +228,11 @@ pub struct RunSummary {
 ///   4. If well_calibrated → record decision and move on (no Stage 2).
 ///   5. Otherwise → run dialogue (Advocate vs Challenger) + Synthesizer,
 ///      then record the full decision row.
-///   6. Close audit row.
-///
-/// Stage 2 still performs no action on the underlying memories — proposed
-/// actions land in the audit row's `action` + `action_payload` columns and
-/// Stage 3 will dispatch them later. Dark-launch by design.
+///   6. Stage 3 dispatcher acts on the recorded row (reframe / flag / keep)
+///      unless `MEMORIA_DIALECTIC_DISPATCH` is `off`. Dispatch outcome
+///      writes back to the same row's `dispatched_at` /
+///      `dispatch_status` / `dispatch_error` columns.
+///   7. Close audit row.
 pub async fn run(env: &Env) -> Result<RunSummary> {
     let db = env.d1("DB")?;
     let mut summary = RunSummary::default();
@@ -262,6 +267,10 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
     };
 
     summary.candidates_reviewed = candidates.len();
+
+    // Stage 3 dispatch mode — read once per run so a mid-run env change
+    // can't produce inconsistent dispatch behaviour across candidates.
+    let dispatch_mode = worker_dialectic_dispatch::DispatchMode::from_env(env);
 
     for candidate in &candidates {
         // Stage 1 first — neutral assessment is the seed.
@@ -327,7 +336,7 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
         let action_label = synth_action_str(&dialogue.synthesis.action);
         let action_payload_json = dialogue.synthesis.action_payload.to_string();
 
-        if let Err(e) = worker_dialectic_audit::record_decision(
+        match worker_dialectic_audit::record_decision(
             &db,
             &run_id,
             &candidate.id,
@@ -340,11 +349,72 @@ pub async fn run(env: &Env) -> Result<RunSummary> {
         )
         .await
         {
-            summary
-                .errors
-                .push(format!("audit decision ({}): {:?}", &candidate.id[..8], e));
-        } else {
-            summary.decisions_count += 1;
+            Err(e) => {
+                summary
+                    .errors
+                    .push(format!("audit decision ({}): {:?}", &candidate.id[..8], e));
+            }
+            Ok(decision_id) => {
+                summary.decisions_count += 1;
+
+                // Stage 3: dispatch (unless killswitched off).
+                if dispatch_mode != worker_dialectic_dispatch::DispatchMode::Off {
+                    match worker_dialectic_dispatch::dispatch_decision(
+                        env,
+                        &db,
+                        &decision_id,
+                        &candidate.id,
+                        action_label,
+                        &dialogue.synthesis.action_payload,
+                        dispatch_mode,
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            // Stamp dispatched_at regardless of soft-failure
+                            // status — the row is processed; the status
+                            // column tells us what happened.
+                            if let Err(e) = worker_dialectic_dispatch::mark_dispatched(
+                                &db,
+                                &decision_id,
+                                &outcome,
+                            )
+                            .await
+                            {
+                                summary.errors.push(format!(
+                                    "mark_dispatched ({}): {:?}",
+                                    &candidate.id[..8],
+                                    e
+                                ));
+                            } else {
+                                summary.actions_dispatched += 1;
+                            }
+                            // Surface non-success outcomes into the run
+                            // summary's error list too, so the cron log
+                            // shows them without a D1 query.
+                            if let Some(err) = &outcome.error {
+                                summary.errors.push(format!(
+                                    "dispatch ({}, status={}): {}",
+                                    &candidate.id[..8],
+                                    outcome.status.as_str(),
+                                    err
+                                ));
+                            }
+                        }
+                        Err(e) => {
+                            // Hard error (e.g. D1 connection died). The
+                            // row stays unmarked; a manual replay or a
+                            // future cron-side "catch up on unmarked" pass
+                            // can pick it up. Logged but not retried here.
+                            summary.errors.push(format!(
+                                "dispatch hard error ({}): {:?}",
+                                &candidate.id[..8],
+                                e
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 

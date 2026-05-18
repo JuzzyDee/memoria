@@ -12,6 +12,7 @@
 // Universal types — shared with the native bins via the same source files.
 mod api_key;
 mod audit;
+mod dialectic_validation;
 mod embed;
 mod key_rate;
 mod memory;
@@ -22,6 +23,7 @@ mod worker_audit;
 mod worker_auth_ctx;
 mod worker_dialectic;
 mod worker_dialectic_audit;
+mod worker_dialectic_dispatch;
 mod worker_embed;
 mod worker_mcp;
 mod worker_mmr;
