@@ -201,64 +201,48 @@ else
     DUMP_FILE="$TMPDIR/source-dump.sql"
     DATA_FILE="$TMPDIR/data-only.sql"
 
-    say "  Exporting ${SOURCE_DB}..."
+    say "  Exporting ${SOURCE_DB} (data only, no schema)..."
     if $DRY_RUN; then
-        dim "[dry-run] wrangler d1 export ${SOURCE_DB} --remote --output=${DUMP_FILE}"
+        dim "[dry-run] wrangler d1 export ${SOURCE_DB} --remote --no-schema --output=${DUMP_FILE}"
     else
-        if ! wrangler d1 export "$SOURCE_DB" --remote --output="$DUMP_FILE" 2>&1 | tail -5; then
+        # --no-schema tells wrangler to skip CREATE TABLE / CREATE INDEX
+        # / PRAGMA / BEGIN / COMMIT entirely; we only get the data
+        # INSERTs. The destination already has its schema from setup.sh
+        # running migrations 0001–0006, so we don't want any of that
+        # anyway. Earlier versions of this script burned a lot of regex
+        # cycles trying to filter schema out post-hoc, including a
+        # multi-line CREATE INDEX that produced misleading "near ON at
+        # offset 5" errors. Letting wrangler omit schema at the source
+        # is the right answer — and per Justin: "why are we creating
+        # tables anyway? setup.sh already did that."
+        if ! wrangler d1 export "$SOURCE_DB" --remote --no-schema --output="$DUMP_FILE" 2>&1 | tail -5; then
             err "D1 export failed."
             exit 1
         fi
         ok "Exported to $(wc -l < "$DUMP_FILE") lines"
     fi
 
-    say "  Stripping schema (INSERT statements pass through as-is)..."
+    say "  Filtering D1 internal-table INSERTs..."
     if $DRY_RUN; then
         dim "[dry-run] sed transform → ${DATA_FILE}"
     else
-        # Drop CREATE TABLE / CREATE INDEX statements (schema is already
-        # applied via migrations on the dest). INSERT statements pass
-        # through unchanged: wrangler d1 export emits upsert-style
-        # `INSERT INTO ... VALUES (...) ON CONFLICT(id) DO UPDATE SET ...`
-        # which is already idempotent for re-runs. An earlier version of
-        # this script prepended `OR IGNORE` to every INSERT, which is
-        # syntactically incompatible with the trailing ON CONFLICT clause
-        # — SQLite rejected the import at offset 5 of the first INSERT.
+        # Even with --no-schema, wrangler still emits INSERTs for D1's
+        # internal bookkeeping tables (d1_migrations, sqlite_sequence,
+        # _cf*). Those belong to CF's per-database state — dest has its
+        # own copies from setup.sh — so we drop them here. Application
+        # INSERTs pass through unchanged; they use the dump's upsert
+        # syntax (`ON CONFLICT(id) DO UPDATE SET ...`) which is
+        # idempotent on re-runs.
         #
-        # We also drop INSERTs into D1's internal bookkeeping tables.
-        # `d1_migrations` is Cloudflare's own migration-tracking table
-        # — setup.sh applied the schema migrations to the dest already,
-        # so dest has its own rows. Re-inserting source's rows hits a
-        # plain PK conflict (no ON CONFLICT clause on the internal
-        # tables) and rolls back the whole import. `sqlite_sequence`
-        # is for AUTOINCREMENT counters (we don't use any, but if a
-        # future migration adds one, we'd still want the dest's
-        # sequence state, not the source's).
-        #
-        # wrangler d1 export quotes table names in the INSERT statements
-        # (e.g. `INSERT INTO "d1_migrations" (...)`). The `"?` in each
-        # pattern makes the leading quote optional so the filter survives
-        # whatever convention a future wrangler version settles on.
-        # Also drop PRAGMA / BEGIN / COMMIT lines. wrangler d1 export
-        # opens the dump with `PRAGMA defer_foreign_keys=TRUE;` and may
-        # wrap statements in an explicit transaction; D1's `execute
-        # --file` path doesn't accept PRAGMA statements (the parser
-        # reports a misleading "near ON" syntax error pointing inside
-        # the next statement). wrangler manages its own atomicity for
-        # the import, so dropping these is safe.
+        # `"?` in each pattern makes the leading quote optional — wrangler
+        # currently quotes table names but a future version might not.
         sed -E \
-            -e '/^CREATE TABLE/,/);$/d' \
-            -e '/^CREATE INDEX/d' \
-            -e '/^CREATE UNIQUE INDEX/d' \
-            -e '/^PRAGMA /d' \
-            -e '/^BEGIN[[:space:]]*(TRANSACTION)?;?$/d' \
-            -e '/^COMMIT;?$/d' \
             -e '/^INSERT INTO "?d1_migrations"?/d' \
             -e '/^INSERT INTO "?sqlite_sequence"?/d' \
             -e '/^INSERT INTO "?_cf/d' \
             "$DUMP_FILE" > "$DATA_FILE"
         INSERTS=$(grep -c "^INSERT" "$DATA_FILE" || true)
-        ok "Transformed: $INSERTS INSERT statements ready"
+        ok "Filtered: $INSERTS INSERT statements ready"
     fi
 
     say "  Applying to ${DEST_DB}..."
