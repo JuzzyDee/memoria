@@ -297,9 +297,14 @@ else
             IDS_CSV=$(paste -sd, "$TMPDIR/batch.txt")
             BATCH_COUNT=$(wc -l < "$TMPDIR/batch.txt" | tr -d ' ')
 
-            # Get vectors from source as JSON
-            if ! VEC_JSON=$(wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids="$IDS_CSV" 2>/dev/null); then
-                warn "Batch $BATCH: get-vectors from $SOURCE_VECTORS failed (skipping)"
+            # Get vectors from source as JSON. Capture stderr to a per-batch
+            # log so failures surface inline — earlier we swallowed stderr
+            # with `2>/dev/null` and got silent "0 vectors copied"
+            # outcomes with no diagnostic.
+            VEC_ERR="$TMPDIR/vec-batch-${BATCH}.err"
+            if ! VEC_JSON=$(wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids="$IDS_CSV" 2>"$VEC_ERR"); then
+                warn "Batch $BATCH: get-vectors from $SOURCE_VECTORS failed:"
+                head -10 "$VEC_ERR" | sed 's/^/      /' >&2
                 continue
             fi
 
@@ -313,8 +318,10 @@ else
                 continue
             fi
 
-            if ! wrangler vectorize insert "$DEST_VECTORS" --file="$TMPDIR/batch.ndjson" >/dev/null 2>&1; then
-                warn "Batch $BATCH: insert into $DEST_VECTORS failed."
+            INS_ERR="$TMPDIR/vec-ins-${BATCH}.err"
+            if ! wrangler vectorize insert "$DEST_VECTORS" --file="$TMPDIR/batch.ndjson" >/dev/null 2>"$INS_ERR"; then
+                warn "Batch $BATCH: insert into $DEST_VECTORS failed:"
+                head -10 "$INS_ERR" | sed 's/^/      /' >&2
                 continue
             fi
 
@@ -339,8 +346,11 @@ else
         dim "[dry-run] would list + copy each object key"
         KEY_COUNT=0
     else
-        if ! R2_LIST=$(wrangler r2 object list "$SOURCE_IMAGES" --remote 2>/dev/null); then
-            warn "Couldn't list ${SOURCE_IMAGES}; skipping R2 stage."
+        R2_LIST_ERR="$TMPDIR/r2-list.err"
+        if ! R2_LIST=$(wrangler r2 object list "$SOURCE_IMAGES" --remote 2>"$R2_LIST_ERR"); then
+            warn "Couldn't list ${SOURCE_IMAGES}:"
+            head -10 "$R2_LIST_ERR" | sed 's/^/      /' >&2
+            warn "Skipping R2 stage."
             KEY_COUNT=0
         else
             # wrangler r2 object list output format varies by version. Try
