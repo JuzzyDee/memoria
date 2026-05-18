@@ -117,6 +117,28 @@ if [ "$SOURCE_DB" = "$DEST_DB" ]; then
     exit 1
 fi
 
+# jq is required for both Vectorize NDJSON shaping and the verification
+# row-counts. Fail early — better than completing D1 and then dying
+# halfway through Vectorize on a missing dependency.
+if ! $SKIP_VECTORS && ! command -v jq >/dev/null 2>&1; then
+    err "jq is required for Vectorize migration (NDJSON shaping)."
+    err "Install jq (brew install jq / apt install jq) and re-run."
+    err "Or pass --skip-vectors if you'll handle vectors separately."
+    exit 1
+fi
+
+# Live-writes warning. The script reads the source D1 at export time;
+# any writes to the old worker AFTER that point won't be in the migrated
+# copy unless you re-run the migration. Cleanest path: stop the old
+# worker's cron + dispatch first, OR plan to re-run after connector
+# cutover to sweep stragglers.
+say ""
+warn "The old worker stays live during migration."
+warn "Any writes to it AFTER the D1 export point won't be in the migrated copy"
+warn "until you re-run this script. For a clean cutover, either:"
+warn "  • Pause the old worker (wrangler triggers delete + secret put ${BOLD}MEMORIA_DIALECTIC_DISPATCH=off${RESET})"
+warn "  • Or re-run this script after Claude-clients are pointed at the new worker"
+
 # ──── Preflight ────────────────────────────────────────────────────────
 
 header "[1/4] Preflight"
@@ -221,15 +243,8 @@ else
         ID_COUNT=0
     else
         IDS_JSON=$(wrangler d1 execute "$DEST_DB" --remote --json --command="SELECT id FROM memories" 2>/dev/null || echo "[]")
-        # Parse JSON output → newline-separated IDs. wrangler --json format
-        # wraps results in a top-level array; jq picks them out cleanly.
-        if command -v jq >/dev/null 2>&1; then
-            echo "$IDS_JSON" | jq -r '.[0].results[]?.id // empty' > "$TMPDIR/ids.txt"
-        else
-            # jq fallback — string extraction. Less robust; recommend jq.
-            warn "jq not found; using grep fallback (install jq for safer parsing)."
-            echo "$IDS_JSON" | grep -oE '"id":"[^"]+"' | sed 's/"id":"\([^"]*\)"/\1/g' > "$TMPDIR/ids.txt"
-        fi
+        # jq is preflight-required at this point, so the JSON parse is direct.
+        echo "$IDS_JSON" | jq -r '.[0].results[]?.id // empty' > "$TMPDIR/ids.txt"
         ID_COUNT=$(wc -l < "$TMPDIR/ids.txt" | tr -d ' ')
         ok "Found $ID_COUNT memory IDs"
     fi
@@ -238,12 +253,7 @@ else
         say "  Migrating vectors in batches of ${VECTORIZE_BATCH}..."
         BATCH=0
         TOTAL_VECTORS=0
-        # Read IDs in batches, get from source, insert into dest.
-        while IFS= read -r -d '' batch_ids || [ -n "$batch_ids" ]; do
-            : # placeholder for parallelism if needed later
-        done < <(:)
 
-        # Simpler line-by-line batching:
         while [ -s "$TMPDIR/ids.txt" ]; do
             head -n "$VECTORIZE_BATCH" "$TMPDIR/ids.txt" > "$TMPDIR/batch.txt"
             tail -n "+$((VECTORIZE_BATCH + 1))" "$TMPDIR/ids.txt" > "$TMPDIR/ids.next" && mv "$TMPDIR/ids.next" "$TMPDIR/ids.txt"
@@ -260,12 +270,8 @@ else
 
             # Transform to NDJSON for vectorize insert. Each line:
             #   {"id":"...","values":[...],"metadata":{...}}
-            if command -v jq >/dev/null 2>&1; then
-                echo "$VEC_JSON" | jq -c '.[] | {id, values, metadata}' > "$TMPDIR/batch.ndjson"
-            else
-                err "jq required for Vectorize migration. brew install jq, then re-run with --skip-d1 --skip-r2."
-                exit 1
-            fi
+            # jq guaranteed by preflight.
+            echo "$VEC_JSON" | jq -c '.[] | {id, values, metadata}' > "$TMPDIR/batch.ndjson"
 
             VECS_IN_BATCH=$(wc -l < "$TMPDIR/batch.ndjson" | tr -d ' ')
             if [ "$VECS_IN_BATCH" -eq 0 ]; then
