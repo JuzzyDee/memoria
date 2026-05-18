@@ -51,19 +51,34 @@ pub enum DispatchMode {
 }
 
 impl DispatchMode {
-    /// Read `MEMORIA_DIALECTIC_DISPATCH` from the worker env. Unrecognised
-    /// values fall through to `On` — we don't want a typo on a secret to
-    /// silently disable the dispatcher.
+    /// Read `MEMORIA_DIALECTIC_DISPATCH` from the worker env.
+    ///
+    /// **Fail-closed:** missing or unrecognised values default to `DryRun`,
+    /// not `On`. Stage 3 is the first dispatcher that mutates the memory
+    /// store; a typo or forgotten secret should not silently enable
+    /// destructive operations. Only an explicit `on` (or `live`) turns on
+    /// real dispatch.
     pub fn from_env(env: &Env) -> Self {
-        let raw = env
-            .var("MEMORIA_DIALECTIC_DISPATCH")
-            .ok()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "on".to_string());
+        let raw = match env.var("MEMORIA_DIALECTIC_DISPATCH") {
+            Ok(v) => v.to_string(),
+            Err(_) => {
+                worker::console_log!(
+                    "MEMORIA_DIALECTIC_DISPATCH not set; defaulting to dry_run (fail-closed)"
+                );
+                return DispatchMode::DryRun;
+            }
+        };
         match raw.to_lowercase().as_str() {
+            "on" | "live" => DispatchMode::On,
             "dry_run" | "dry-run" | "dryrun" => DispatchMode::DryRun,
             "off" | "disabled" => DispatchMode::Off,
-            _ => DispatchMode::On,
+            other => {
+                worker::console_error!(
+                    "MEMORIA_DIALECTIC_DISPATCH={:?} unrecognised; defaulting to dry_run",
+                    other
+                );
+                DispatchMode::DryRun
+            }
         }
     }
 }
@@ -175,14 +190,18 @@ pub async fn dispatch_decision(
 ///   1. Fetch the original memory (preserve for audit + bail if missing)
 ///   2. Embed the new content (bail if Workers AI fails — no mutation yet)
 ///   3. Upsert Vectorize (bail if it fails — still no D1 mutation)
-///   4. Update D1 content + summary
-///   5. Append to memory_reframes (original preserved, reversible via SQL)
+///   4. **Atomic D1 batch**: UPDATE `memories` content/summary + INSERT into
+///      `memory_reframes`. D1 batches are transactional — either both
+///      statements commit or neither does. This is the guarantee that
+///      backs the "every reframe is reversible" safety claim: the
+///      destructive update can never land without the audit row carrying
+///      the original.
 ///
-/// The order matters: embedding/Vectorize failures cost nothing in terms
-/// of memory-store state, so we run them first. By the time we touch D1,
-/// we know the vector half landed. If step 4 fails after step 3 succeeded
-/// we have a small inconsistency window — accepted per CLA-100 design,
-/// next dialectic pass self-heals.
+/// Order matters: embedding/Vectorize failures cost nothing in terms of
+/// D1 state, so we run them first. If step 3 succeeds and step 4 fails,
+/// the new vector is in place but D1 is untouched — a small inconsistency
+/// window accepted per CLA-100 design, since the next dialectic pass will
+/// re-embed the still-old content and self-heal.
 async fn reframe_memory(
     env: &Env,
     db: &D1Database,
@@ -221,18 +240,27 @@ async fn reframe_memory(
         ));
     }
 
-    // 4. Update D1 content + summary.
-    if let Err(e) = worker_store::reframe(db, memory_id, new_content, new_summary).await {
-        return Ok(DispatchOutcome::err(
-            DispatchStatus::Error,
-            format!("d1 reframe: {:?}", e),
-        ));
-    }
-
-    // 5. Audit row — preserve the original so the reframe is reversible.
-    let reframe_id = Uuid::new_v4().to_string();
+    // 4. Atomic D1 batch — UPDATE memories + INSERT memory_reframes.
+    //    Either both land or neither does. Without atomicity, an audit
+    //    insert that fails after the UPDATE succeeded would destroy the
+    //    only copy of the original content. We do not accept that path.
     let now = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = db
+    let reframe_id = Uuid::new_v4().to_string();
+
+    let update_stmt = db
+        .prepare(
+            "UPDATE memories
+             SET content = ?, summary = ?, last_accessed = ?
+             WHERE id = ?",
+        )
+        .bind(&[
+            new_content.into(),
+            new_summary.into(),
+            now.clone().into(),
+            memory_id.into(),
+        ])?;
+
+    let audit_stmt = db
         .prepare(
             "INSERT INTO memory_reframes
                 (reframe_id, memory_id, decision_id,
@@ -248,27 +276,22 @@ async fn reframe_memory(
             new_content.into(),
             new_summary.into(),
             now.into(),
-        ])?
-        .run()
-        .await
-    {
-        // Reframe succeeded but audit insert didn't land. The memory has
-        // already been updated; rolling it back would require us to know
-        // the original, which we just lost confidence in writing. Log
-        // loudly and surface a success-with-warning rather than
-        // pretending nothing happened.
+        ])?;
+
+    if let Err(e) = db.batch(vec![update_stmt, audit_stmt]).await {
+        // D1 batch is atomic — if it failed, neither statement committed.
+        // The memory is still in its pre-reframe state. The vector half
+        // is the only thing that already landed; next dialectic pass
+        // will surface and re-process.
         console_error!(
-            "memory_reframes insert failed after successful reframe (memory {}): {:?}",
+            "reframe batch failed (memory {} unchanged, vector stale): {:?}",
             memory_id,
             e
         );
-        return Ok(DispatchOutcome {
-            status: DispatchStatus::Success,
-            error: Some(format!(
-                "reframe applied but audit insert failed: {:?}",
-                e
-            )),
-        });
+        return Ok(DispatchOutcome::err(
+            DispatchStatus::Error,
+            format!("reframe batch failed: {:?}", e),
+        ));
     }
 
     Ok(DispatchOutcome::ok(DispatchStatus::Success))
@@ -315,6 +338,11 @@ async fn record_flag(
 /// Mark a decision row as dispatched. Always sets `dispatched_at`;
 /// `dispatch_status` records the outcome; `dispatch_error` carries the
 /// error message when status is not success/dry_run.
+///
+/// The `WHERE dispatched_at IS NULL` guard makes this primitive idempotent
+/// on its own — re-calling it on an already-dispatched row is a safe
+/// no-op rather than overwriting an earlier outcome. Future replay/
+/// catch-up paths can rely on this without holding their own filter.
 pub async fn mark_dispatched(
     db: &D1Database,
     decision_id: &str,
@@ -328,7 +356,7 @@ pub async fn mark_dispatched(
     db.prepare(
         "UPDATE dialectic_decisions
             SET dispatched_at = ?, dispatch_status = ?, dispatch_error = ?
-         WHERE decision_id = ?",
+         WHERE decision_id = ? AND dispatched_at IS NULL",
     )
     .bind(&[
         now.into(),
