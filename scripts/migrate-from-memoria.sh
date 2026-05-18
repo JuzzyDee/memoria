@@ -5,7 +5,7 @@
 #
 # Stages:
 #   1. Preflight   — verify source + dest resources, dest schema applied
-#   2. D1          — export memoria-db, transform, INSERT OR IGNORE into oneiro-db
+#   2. D1          — export memoria-db, strip schema, apply to oneiro-db
 #   3. Vectorize   — getByIds in batches from memoria-vectors → upsert into oneiro-vectors
 #   4. R2          — list memoria-images keys, copy each to oneiro-images
 #   5. Verify      — count rows / vectors / objects in dest, report deltas
@@ -49,7 +49,12 @@ DRY_RUN=false
 SKIP_D1=false
 SKIP_VECTORS=false
 SKIP_R2=false
-VECTORIZE_BATCH=100
+# Vectorize's get-vectors API caps the request at 20 IDs (CF limit;
+# empirically: "max id count is 20"). Match that ceiling exactly —
+# anything higher gets rejected before the request even reaches the
+# index. 500 memories ÷ 20 = 25 batches, each still completing in well
+# under a second.
+VECTORIZE_BATCH=20
 
 usage() {
     cat <<EOF
@@ -179,7 +184,19 @@ ok "R2 buckets present"
 # ──── Stage 2: D1 ──────────────────────────────────────────────────────
 
 TMPDIR=$(mktemp -d -t oneiro-migrate.XXXXXX)
-trap 'rm -rf "$TMPDIR"' EXIT
+# Only clean tmpdir if the script exits cleanly. On failure we want the
+# SQL dump, transformed data file, and any captured wrangler logs to
+# stick around so the operator can investigate.
+MIGRATION_OK=false
+cleanup_tmpdir() {
+    if $MIGRATION_OK; then
+        rm -rf "$TMPDIR"
+    else
+        warn "Migration did not complete cleanly — preserving tmpdir for inspection:"
+        warn "  $TMPDIR"
+    fi
+}
+trap cleanup_tmpdir EXIT
 
 if $SKIP_D1; then
     header "[2/4] D1 migration — ${YELLOW}skipped${RESET}"
@@ -189,44 +206,79 @@ else
     DUMP_FILE="$TMPDIR/source-dump.sql"
     DATA_FILE="$TMPDIR/data-only.sql"
 
-    say "  Exporting ${SOURCE_DB}..."
+    say "  Exporting ${SOURCE_DB} (data only, no schema)..."
     if $DRY_RUN; then
-        dim "[dry-run] wrangler d1 export ${SOURCE_DB} --remote --output=${DUMP_FILE}"
+        dim "[dry-run] wrangler d1 export ${SOURCE_DB} --remote --no-schema --output=${DUMP_FILE}"
     else
-        if ! wrangler d1 export "$SOURCE_DB" --remote --output="$DUMP_FILE" 2>&1 | tail -5; then
+        # --no-schema tells wrangler to skip CREATE TABLE / CREATE INDEX
+        # / PRAGMA / BEGIN / COMMIT entirely; we only get the data
+        # INSERTs. The destination already has its schema from setup.sh
+        # running migrations 0001–0006, so we don't want any of that
+        # anyway. Earlier versions of this script burned a lot of regex
+        # cycles trying to filter schema out post-hoc, including a
+        # multi-line CREATE INDEX that produced misleading "near ON at
+        # offset 5" errors. Letting wrangler omit schema at the source
+        # is the right answer — and per Justin: "why are we creating
+        # tables anyway? setup.sh already did that."
+        if ! wrangler d1 export "$SOURCE_DB" --remote --no-schema --output="$DUMP_FILE" 2>&1 | tail -5; then
             err "D1 export failed."
             exit 1
         fi
         ok "Exported to $(wc -l < "$DUMP_FILE") lines"
     fi
 
-    say "  Stripping schema, converting INSERT → INSERT OR IGNORE..."
+    say "  Filtering + making idempotent..."
     if $DRY_RUN; then
         dim "[dry-run] sed transform → ${DATA_FILE}"
     else
-        # Drop CREATE TABLE / CREATE INDEX statements (schema is already
-        # applied via migrations on the dest). Convert INSERT INTO to
-        # INSERT OR IGNORE INTO so a re-run is safe — primary keys
-        # already in dest won't error, they're just skipped.
+        # Two transforms on the dump:
+        #
+        # 1. Drop INSERTs into D1's internal bookkeeping tables
+        #    (d1_migrations, sqlite_sequence, _cf*). Those belong to
+        #    CF's per-database state — dest has its own copies from
+        #    setup.sh — so importing source's rows would PK-collide.
+        #
+        # 2. Prepend `OR IGNORE` to every remaining INSERT INTO.
+        #    Empirically (run #6 of the dogfood), wrangler d1 export
+        #    --no-schema emits plain `INSERT INTO "table" (...) VALUES (...);`
+        #    statements with NO upsert clause. First-run import works
+        #    because dest is empty; re-run import fails on PK collision.
+        #    OR IGNORE makes the import idempotent — existing rows in
+        #    dest get skipped, new ones get inserted. The cost is that
+        #    if a source row has been UPDATED since the previous
+        #    migration, the dest stays at the older version — but
+        #    that's correct for a one-time cutover where the source is
+        #    frozen.
+        #
+        # `"?` in patterns makes the leading quote optional in case
+        # a future wrangler version drops the quoting convention.
         sed -E \
-            -e '/^CREATE TABLE/,/);$/d' \
-            -e '/^CREATE INDEX/d' \
-            -e '/^CREATE UNIQUE INDEX/d' \
+            -e '/^INSERT INTO "?d1_migrations"?/d' \
+            -e '/^INSERT INTO "?sqlite_sequence"?/d' \
+            -e '/^INSERT INTO "?_cf/d' \
             -e 's/^INSERT INTO/INSERT OR IGNORE INTO/' \
             "$DUMP_FILE" > "$DATA_FILE"
         INSERTS=$(grep -c "^INSERT OR IGNORE" "$DATA_FILE" || true)
-        ok "Transformed: $INSERTS INSERT statements ready"
+        ok "Filtered: $INSERTS INSERT OR IGNORE statements ready"
     fi
 
     say "  Applying to ${DEST_DB}..."
     if $DRY_RUN; then
         dim "[dry-run] wrangler d1 execute ${DEST_DB} --remote --file=${DATA_FILE}"
     else
-        if ! wrangler d1 execute "$DEST_DB" --remote --file="$DATA_FILE" 2>&1 | tail -3; then
-            err "D1 import failed. Check ${DATA_FILE} for details."
+        EXEC_LOG="$TMPDIR/d1-import.log"
+        if wrangler d1 execute "$DEST_DB" --remote --file="$DATA_FILE" > "$EXEC_LOG" 2>&1; then
+            tail -3 "$EXEC_LOG"
+            ok "D1 import complete"
+        else
+            err "D1 import failed. Last 30 lines of wrangler output:"
+            tail -30 "$EXEC_LOG" | sed 's/^/    /' >&2
+            err "Full output preserved at: ${EXEC_LOG}"
+            err "Transformed SQL preserved at: ${DATA_FILE}"
+            err "Source dump preserved at:    ${DUMP_FILE}"
+            err "(tmpdir is not deleted on failure — inspect freely)"
             exit 1
         fi
-        ok "D1 import complete"
     fi
 fi
 
@@ -259,27 +311,72 @@ else
             tail -n "+$((VECTORIZE_BATCH + 1))" "$TMPDIR/ids.txt" > "$TMPDIR/ids.next" && mv "$TMPDIR/ids.next" "$TMPDIR/ids.txt"
 
             BATCH=$((BATCH + 1))
-            IDS_CSV=$(paste -sd, "$TMPDIR/batch.txt")
             BATCH_COUNT=$(wc -l < "$TMPDIR/batch.txt" | tr -d ' ')
 
-            # Get vectors from source as JSON
-            if ! VEC_JSON=$(wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids="$IDS_CSV" 2>/dev/null); then
-                warn "Batch $BATCH: get-vectors from $SOURCE_VECTORS failed (skipping)"
-                continue
-            fi
+            # Build an argv array of IDs. wrangler's `--ids` flag is an
+            # array type (yargs convention) — it accepts multiple values
+            # as separate arguments, NOT as a single comma-separated
+            # value. Passing `--ids=<csv>` was treating the entire CSV
+            # string as one ID and triggering the API's 64-byte id limit
+            # ("id too long; max is 64 bytes, got 3559 bytes").
+            #
+            # Loop instead of mapfile so this works on bash 3.2 (macOS
+            # default) — mapfile is bash 4+.
+            IDS_ARR=()
+            while IFS= read -r id; do
+                [ -n "$id" ] && IDS_ARR+=("$id")
+            done < "$TMPDIR/batch.txt"
+
+            # Get vectors from source. wrangler dumps a decorative banner
+            # to stdout BEFORE the JSON payload:
+            #
+            #      ⛅️ wrangler 4.90.1 (update available ...)
+            #     ─────────────────────────────────────────
+            #     📋 Fetching vectors...
+            #     [{"id":"...","values":[...]}]
+            #
+            # jq can't parse from byte 0 because of the emoji prefix, so
+            # we sed everything before the first line starting with `[`
+            # out before piping to jq. The wrangler banner appears on
+            # stdout (not stderr — verified empirically) so we can't
+            # filter via 2>/dev/null.
+            #
+            # wrangler also emits a WARNING + non-zero exit when any ID
+            # in the batch lacks a vector. Capture stdout regardless of
+            # exit code, parse what's there. Vectors that exist land;
+            # missing IDs quietly skip.
+            VEC_OUT="$TMPDIR/vec-batch-${BATCH}.raw"
+            VEC_JSON="$TMPDIR/vec-batch-${BATCH}.json"
+            VEC_ERR="$TMPDIR/vec-batch-${BATCH}.err"
+            wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids "${IDS_ARR[@]}" \
+                > "$VEC_OUT" 2>"$VEC_ERR" || true
+
+            # Strip the wrangler banner — keep from first `[` line onwards.
+            sed -n '/^\[/,$p' "$VEC_OUT" > "$VEC_JSON"
 
             # Transform to NDJSON for vectorize insert. Each line:
             #   {"id":"...","values":[...],"metadata":{...}}
-            # jq guaranteed by preflight.
-            echo "$VEC_JSON" | jq -c '.[] | {id, values, metadata}' > "$TMPDIR/batch.ndjson"
+            # `.[]?` is tolerant of empty input. jq's stderr is captured
+            # so parse failures tell us what jq actually disliked.
+            JQ_ERR="$TMPDIR/jq-batch-${BATCH}.err"
+            if ! jq -c '.[]? | {id, values, metadata}' "$VEC_JSON" \
+                > "$TMPDIR/batch.ndjson" 2>"$JQ_ERR"; then
+                warn "Batch $BATCH: jq failed to parse get-vectors output:"
+                head -5 "$JQ_ERR" | sed 's/^/      [jq] /' >&2
+                head -c 300 "$VEC_JSON" | sed 's/^/      [json] /' >&2
+                printf '\n' >&2
+                continue
+            fi
 
             VECS_IN_BATCH=$(wc -l < "$TMPDIR/batch.ndjson" | tr -d ' ')
             if [ "$VECS_IN_BATCH" -eq 0 ]; then
                 continue
             fi
 
-            if ! wrangler vectorize insert "$DEST_VECTORS" --file="$TMPDIR/batch.ndjson" >/dev/null 2>&1; then
-                warn "Batch $BATCH: insert into $DEST_VECTORS failed."
+            INS_ERR="$TMPDIR/vec-ins-${BATCH}.err"
+            if ! wrangler vectorize insert "$DEST_VECTORS" --file="$TMPDIR/batch.ndjson" >/dev/null 2>"$INS_ERR"; then
+                warn "Batch $BATCH: insert into $DEST_VECTORS failed:"
+                head -10 "$INS_ERR" | sed 's/^/      /' >&2
                 continue
             fi
 
@@ -299,37 +396,51 @@ if $SKIP_R2; then
 else
     header "[4/4] R2 migration"
 
-    say "  Listing objects in ${SOURCE_IMAGES}..."
+    # wrangler doesn't have a `r2 object list` subcommand (only get/put/
+    # delete — known gap on the wrangler side). Instead of fighting the
+    # CLI, we use D1 as the source of truth for which images exist:
+    # every image stored has a row in `memories` with image_hash +
+    # image_mime, and the R2 key is `{hash}.{ext}` per the convention in
+    # worker_store::store_image_to_r2. Querying D1 also has the nice
+    # property of only migrating images actually referenced by memories —
+    # any orphan R2 objects from earlier failed writes get left behind
+    # (correct semantics; orphans don't matter for Oneiro's operation).
+    say "  Querying ${DEST_DB} for image references..."
     if $DRY_RUN; then
-        dim "[dry-run] would list + copy each object key"
+        dim "[dry-run] would query D1 for image_hash + image_mime, copy each"
         KEY_COUNT=0
     else
-        if ! R2_LIST=$(wrangler r2 object list "$SOURCE_IMAGES" --remote 2>/dev/null); then
-            warn "Couldn't list ${SOURCE_IMAGES}; skipping R2 stage."
+        IMG_ERR="$TMPDIR/img-query.err"
+        IMG_JSON=$(wrangler d1 execute "$DEST_DB" --remote --json \
+            --command="SELECT DISTINCT image_hash, image_mime FROM memories WHERE image_hash IS NOT NULL" \
+            2>"$IMG_ERR" || true)
+        # Parse to lines of "hash mime" — jq guaranteed by preflight.
+        if ! echo "$IMG_JSON" | jq -r '.[0].results[]? | "\(.image_hash) \(.image_mime)"' \
+            > "$TMPDIR/r2-images.txt" 2>/dev/null; then
+            warn "Couldn't extract image references from ${DEST_DB}:"
+            head -10 "$IMG_ERR" | sed 's/^/      /' >&2
+            warn "Skipping R2 stage."
             KEY_COUNT=0
         else
-            # wrangler r2 object list output format varies by version. Try
-            # JSON parse first; fall back to whitespace parse.
-            if command -v jq >/dev/null 2>&1; then
-                echo "$R2_LIST" | jq -r '.[]?.key // empty' > "$TMPDIR/r2-keys.txt" 2>/dev/null || \
-                    echo "$R2_LIST" | awk 'NR>1 {print $1}' > "$TMPDIR/r2-keys.txt"
-            else
-                echo "$R2_LIST" | awk 'NR>1 {print $1}' > "$TMPDIR/r2-keys.txt"
-            fi
-            # Filter out blank/header lines
-            grep -E '\.(jpg|jpeg|png|webp)$' "$TMPDIR/r2-keys.txt" > "$TMPDIR/r2-keys.filtered" || true
-            mv "$TMPDIR/r2-keys.filtered" "$TMPDIR/r2-keys.txt"
-            KEY_COUNT=$(wc -l < "$TMPDIR/r2-keys.txt" | tr -d ' ')
-            ok "Found $KEY_COUNT image keys"
+            KEY_COUNT=$(wc -l < "$TMPDIR/r2-images.txt" | tr -d ' ')
+            ok "Found $KEY_COUNT image references in D1"
         fi
     fi
 
     if [ "$KEY_COUNT" -gt 0 ] && ! $DRY_RUN; then
-        say "  Copying objects (this can take a while for large buckets)..."
+        say "  Copying objects (this can take a while for many images)..."
         COPIED=0
         FAILED=0
-        while IFS= read -r KEY; do
-            [ -z "$KEY" ] && continue
+        while IFS=' ' read -r HASH MIME; do
+            [ -z "$HASH" ] && continue
+            # Map MIME to extension — matches worker_store::mime_to_ext.
+            case "$MIME" in
+                "image/png")  EXT="png" ;;
+                "image/jpeg") EXT="jpg" ;;
+                "image/webp") EXT="webp" ;;
+                *)            EXT="bin" ;;
+            esac
+            KEY="${HASH}.${EXT}"
             TMP_OBJ="$TMPDIR/obj-$$"
             if wrangler r2 object get "$SOURCE_IMAGES/$KEY" --remote --file="$TMP_OBJ" >/dev/null 2>&1 && \
                wrangler r2 object put "$DEST_IMAGES/$KEY" --remote --file="$TMP_OBJ" >/dev/null 2>&1; then
@@ -342,7 +453,7 @@ else
             if [ $((COPIED % 10)) -eq 0 ] && [ "$COPIED" -gt 0 ]; then
                 dim "  copied $COPIED / $KEY_COUNT"
             fi
-        done < "$TMPDIR/r2-keys.txt"
+        done < "$TMPDIR/r2-images.txt"
         ok "R2 migration: $COPIED copied, $FAILED failed"
     fi
 fi
@@ -376,3 +487,6 @@ say "       ${DIM}wrangler delete --name memoria${RESET}"
 say "       ${DIM}wrangler d1 delete ${SOURCE_DB}${RESET}"
 say "       ${DIM}wrangler vectorize delete ${SOURCE_VECTORS}${RESET}"
 say "       ${DIM}wrangler r2 bucket delete ${SOURCE_IMAGES}${RESET}"
+
+# Signal the trap that we got here cleanly — tmpdir is safe to remove.
+MIGRATION_OK=true
