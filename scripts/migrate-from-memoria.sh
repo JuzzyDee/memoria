@@ -222,27 +222,39 @@ else
         ok "Exported to $(wc -l < "$DUMP_FILE") lines"
     fi
 
-    say "  Filtering D1 internal-table INSERTs..."
+    say "  Filtering + making idempotent..."
     if $DRY_RUN; then
         dim "[dry-run] sed transform → ${DATA_FILE}"
     else
-        # Even with --no-schema, wrangler still emits INSERTs for D1's
-        # internal bookkeeping tables (d1_migrations, sqlite_sequence,
-        # _cf*). Those belong to CF's per-database state — dest has its
-        # own copies from setup.sh — so we drop them here. Application
-        # INSERTs pass through unchanged; they use the dump's upsert
-        # syntax (`ON CONFLICT(id) DO UPDATE SET ...`) which is
-        # idempotent on re-runs.
+        # Two transforms on the dump:
         #
-        # `"?` in each pattern makes the leading quote optional — wrangler
-        # currently quotes table names but a future version might not.
+        # 1. Drop INSERTs into D1's internal bookkeeping tables
+        #    (d1_migrations, sqlite_sequence, _cf*). Those belong to
+        #    CF's per-database state — dest has its own copies from
+        #    setup.sh — so importing source's rows would PK-collide.
+        #
+        # 2. Prepend `OR IGNORE` to every remaining INSERT INTO.
+        #    Empirically (run #6 of the dogfood), wrangler d1 export
+        #    --no-schema emits plain `INSERT INTO "table" (...) VALUES (...);`
+        #    statements with NO upsert clause. First-run import works
+        #    because dest is empty; re-run import fails on PK collision.
+        #    OR IGNORE makes the import idempotent — existing rows in
+        #    dest get skipped, new ones get inserted. The cost is that
+        #    if a source row has been UPDATED since the previous
+        #    migration, the dest stays at the older version — but
+        #    that's correct for a one-time cutover where the source is
+        #    frozen.
+        #
+        # `"?` in patterns makes the leading quote optional in case
+        # a future wrangler version drops the quoting convention.
         sed -E \
             -e '/^INSERT INTO "?d1_migrations"?/d' \
             -e '/^INSERT INTO "?sqlite_sequence"?/d' \
             -e '/^INSERT INTO "?_cf/d' \
+            -e 's/^INSERT INTO/INSERT OR IGNORE INTO/' \
             "$DUMP_FILE" > "$DATA_FILE"
-        INSERTS=$(grep -c "^INSERT" "$DATA_FILE" || true)
-        ok "Filtered: $INSERTS INSERT statements ready"
+        INSERTS=$(grep -c "^INSERT OR IGNORE" "$DATA_FILE" || true)
+        ok "Filtered: $INSERTS INSERT OR IGNORE statements ready"
     fi
 
     say "  Applying to ${DEST_DB}..."
