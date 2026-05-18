@@ -1,4 +1,4 @@
-// lib.rs — Memoria as a Cloudflare Worker (CLA-84).
+// lib.rs — Oneiro as a Cloudflare Worker (CLA-84).
 //
 // Public surface, by design, is just POST /mcp (authenticated MCP via
 // JSON-RPC). Everything else falls through to a placeholder string —
@@ -12,6 +12,7 @@
 // Universal types — shared with the native bins via the same source files.
 mod api_key;
 mod audit;
+mod dialectic_validation;
 mod embed;
 mod key_rate;
 mod memory;
@@ -22,6 +23,7 @@ mod worker_audit;
 mod worker_auth_ctx;
 mod worker_dialectic;
 mod worker_dialectic_audit;
+mod worker_dialectic_dispatch;
 mod worker_embed;
 mod worker_mcp;
 mod worker_mmr;
@@ -30,6 +32,7 @@ mod worker_rem;
 mod worker_rem_audit;
 mod worker_store;
 mod worker_vectorize;
+mod worker_version;
 
 use worker::{event, Context, Env, Method, Request, Response, Result, ScheduleContext, ScheduledEvent};
 
@@ -45,7 +48,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let host = req
         .headers()
         .get("host")?
-        .unwrap_or_else(|| "memoria.juzzydee.workers.dev".to_string());
+        .unwrap_or_else(|| "oneiro.juzzydee.workers.dev".to_string());
     let base_url = format!("https://{}", host);
 
     match (method, path.as_str()) {
@@ -55,7 +58,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
         // Admin import — verbatim memory write for the data migration
         // (CLA-84 phase 8) and future disaster-recovery flows. Auth via
-        // MEMORIA_ADMIN_KEY secret, NOT the per-role service-key allowlist.
+        // ONEIRO_ADMIN_KEY secret, NOT the per-role service-key allowlist.
         (Method::Post, "/admin/import") => worker_admin::handle_import(&env, &mut req).await,
 
         // OAuth 2.1 — Authorization Code + Client Credentials grants.
@@ -73,7 +76,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         (Method::Get, "/healthz") => Response::ok("ok"),
 
         // Default — no info leakage.
-        _ => Response::ok("memoria"),
+        _ => Response::ok("oneiro"),
     }
 }
 
@@ -114,7 +117,14 @@ async fn render_consent_page(env: &Env, req: &Request) -> Result<Response> {
     };
     let redirect_uri = q("redirect_uri");
     if !worker_oauth::is_registered_redirect_uri(env, &redirect_uri).await {
-        return Response::error("invalid_request: redirect_uri not registered", 400);
+        // Include the offending URI in the response body so the operator
+        // can copy it directly into ONEIRO_OAUTH_REDIRECT_URIS without
+        // having to dig it out of logs or guess at form-encoded params.
+        // (Setup script's troubleshooting hint relies on this text.)
+        return Response::error(
+            format!("invalid_request: redirect_uri not registered: {}", redirect_uri),
+            400,
+        );
     }
     worker_oauth::render_authorize_page(
         &q("client_id"),

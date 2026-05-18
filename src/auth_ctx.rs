@@ -65,7 +65,7 @@ tokio::task_local! {
     /// cases, which preserves existing local-mode behaviour.
     pub static AUTH_CTX: AuthCtx;
 
-    /// Path to the memoria DB, used by audit writes. Set alongside
+    /// Path to the oneiro DB, used by audit writes. Set alongside
     /// AUTH_CTX at the HTTP boundary. Unset in stdio / tests — audit
     /// writes are silently skipped when unset.
     pub static DB_PATH: PathBuf;
@@ -85,7 +85,7 @@ fn audit_log_if_possible(key_id: &str, role: Role, tool: &str, outcome: audit::O
     });
 }
 
-/// Return the value memoria should record as a memory's `recorded_by`
+/// Return the value oneiro should record as a memory's `recorded_by`
 /// based on the current auth context.
 ///
 ///   `AuthCtx::OAuth`   →  `Some("claude")`

@@ -349,18 +349,53 @@ pub async fn recall_by_entity(
 /// place to catch inflation before it consolidates into the system's
 /// stable understanding. Stage 3 will replace this with a richer
 /// selection (skip recently-reviewed, weight by access count, etc.).
-pub async fn recent_semantics(db: &D1Database, limit: usize) -> Result<Vec<Memory>> {
+/// Recent semantic memories *excluding* those the dialectic has judged
+/// within the last `cooldown_days`. Used by Stage 1 candidate selection
+/// to prevent re-litigation of recently-evaluated memories (CLA-101).
+///
+/// A memory is excluded if any row in `dialectic_decisions` references
+/// it with a `created_at` more recent than `now - cooldown_days`. The
+/// cooldown gates on *any* decision regardless of action — including
+/// well_calibrated short-circuits — so the dialectic spreads its
+/// attention across the full semantic pool over the cooldown window
+/// instead of re-judging the same N most-recent memories every night.
+///
+/// Why gate on `dialectic_decisions.created_at` rather than
+/// `memory_reframes.reframed_at`: in dry-run mode the dispatcher never
+/// writes to `memory_reframes`, so a `memory_reframes`-based gate is
+/// silent until live cutover and the same memories keep getting
+/// re-judged every night during burn-in. Decision-time is the event
+/// we want to cool down on (Haiku has run, dialogue has happened, a
+/// proposal exists) — not the eventual application of that proposal.
+///
+/// `datetime(d.last_decided_at)` normalises the RFC 3339 string we
+/// store into SQLite's native datetime format so the comparison against
+/// `datetime('now', ...)` is structural, not lexicographic. (Without it
+/// the `T` separator and timezone suffix in RFC 3339 don't compare
+/// cleanly against SQLite's default `YYYY-MM-DD HH:MM:SS`.)
+pub async fn recent_semantics_not_recently_judged(
+    db: &D1Database,
+    limit: usize,
+    cooldown_days: u32,
+) -> Result<Vec<Memory>> {
     let rows: Vec<MemoryRow> = db
         .prepare(
-            "SELECT id, memory_type, content, summary, created_at, last_accessed,
-                    access_count, strength, stability, entity, tags, image_hash,
-                    image_mime, recorded_by
-             FROM memories
-             WHERE memory_type = 'semantic'
-             ORDER BY created_at DESC
+            "SELECT m.id, m.memory_type, m.content, m.summary, m.created_at,
+                    m.last_accessed, m.access_count, m.strength, m.stability,
+                    m.entity, m.tags, m.image_hash, m.image_mime, m.recorded_by
+             FROM memories m
+             LEFT JOIN (
+                 SELECT memory_id, MAX(created_at) AS last_decided_at
+                 FROM dialectic_decisions
+                 GROUP BY memory_id
+             ) d ON m.id = d.memory_id
+             WHERE m.memory_type = 'semantic'
+               AND (d.last_decided_at IS NULL
+                    OR datetime(d.last_decided_at) < datetime('now', '-' || ? || ' days'))
+             ORDER BY m.created_at DESC
              LIMIT ?",
         )
-        .bind(&[(limit as u32).into()])?
+        .bind(&[cooldown_days.into(), (limit as u32).into()])?
         .all()
         .await?
         .results()?;

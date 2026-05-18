@@ -1,4 +1,4 @@
-# CLAUDE.md — Oneiro
+# Oneiro — Architecture Reference
 
 ## What This Is
 

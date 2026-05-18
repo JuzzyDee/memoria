@@ -117,7 +117,7 @@ fn handle_initialize() -> Value {
             "tools": {}
         },
         "serverInfo": {
-            "name": "memoria",
+            "name": "oneiro",
             "version": env!("CARGO_PKG_VERSION"),
         }
     })
@@ -520,7 +520,7 @@ async fn tool_recall(
         .unwrap_or((0, 0, 0));
 
     let mut out = format!(
-        "═══ Memoria ═══\nMemory store: {} episodic, {} semantic, {} orientation\nContext: {}\n\n",
+        "═══ Oneiro ═══\nMemory store: {} episodic, {} semantic, {} orientation\nContext: {}\n\n",
         ep, sem, ori, args.context
     );
 
@@ -539,6 +539,23 @@ async fn tool_recall(
         }
     } else if orientation.is_empty() {
         out.push_str("No memories yet. This is a fresh start.\n");
+    }
+
+    // Update prompt — only surfaces when remote version > running version.
+    // Lives at the bottom of the recall output so it doesn't disrupt the
+    // memory listing's structure but is still visible to the model
+    // reading the response. Fail-soft: any error returns None and we
+    // append nothing. (CLA-102)
+    if let Ok(Some(update)) = crate::worker_version::check_for_update(env).await {
+        out.push_str("\n── Oneiro update available ──\n");
+        out.push_str(&format!(
+            "Running {} → latest {}",
+            update.current, update.latest
+        ));
+        if let Some(url) = &update.url {
+            out.push_str(&format!("\nRelease notes: {}", url));
+        }
+        out.push('\n');
     }
 
     Ok(out)
@@ -781,7 +798,7 @@ async fn tool_recall_check(
 
     let (ep, sem, ori) = worker_store::count_by_type(db).await.unwrap_or((0, 0, 0));
     let mut out = format!(
-        "═══ Memoria Check ═══\nStore: {} ep, {} sem, {} ori | Topic: \"{}\" | Threshold: {:.2}\n\n",
+        "═══ Oneiro Check ═══\nStore: {} ep, {} sem, {} ori | Topic: \"{}\" | Threshold: {:.2}\n\n",
         ep, sem, ori, args.topic, min_similarity
     );
 
@@ -869,7 +886,7 @@ async fn tool_review(db: &D1Database, args: Value) -> std::result::Result<String
     let (ep, sem, ori) = worker_store::count_by_type(db).await.unwrap_or((0, 0, 0));
 
     let mut out = format!(
-        "═══ Memoria Review ═══\nStore: {} episodic, {} semantic, {} orientation\n\n",
+        "═══ Oneiro Review ═══\nStore: {} episodic, {} semantic, {} orientation\n\n",
         ep, sem, ori
     );
 

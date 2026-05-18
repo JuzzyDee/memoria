@@ -26,7 +26,7 @@ fi
 # Enable agent teams
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 
-echo "═══ Memoria Dialectic Subconscious ═══"
+echo "═══ Oneiro Dialectic Subconscious ═══"
 echo "Time: $(date)"
 echo "Thinking about thinking... adversarially."
 echo ""
@@ -48,7 +48,7 @@ if [ "$1" = "--verbose" ]; then
     VERBOSE_FLAG="--verbose"
 fi
 
-claude -p "$PROMPT" $MODEL_FLAG $VERBOSE_FLAG --allowedTools "mcp__memoria__recall,mcp__memoria__recall_check,mcp__memoria__recall_specific,mcp__memoria__recall_image,mcp__memoria__remember,mcp__memoria__reflect,mcp__memoria__reframe,mcp__memoria__forget,mcp__memoria__review"
+claude -p "$PROMPT" $MODEL_FLAG $VERBOSE_FLAG --allowedTools "mcp__oneiro__recall,mcp__oneiro__recall_check,mcp__oneiro__recall_specific,mcp__oneiro__recall_image,mcp__oneiro__remember,mcp__oneiro__reflect,mcp__oneiro__reframe,mcp__oneiro__forget,mcp__oneiro__review"
 
 echo ""
 echo "═══ Dialectic processing complete ═══"

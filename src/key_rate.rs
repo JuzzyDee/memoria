@@ -4,7 +4,7 @@
 // attacker who somehow got a key off the rover can siphon at most ~60
 // reads + 10 writes per minute, not unbounded.
 //
-// Cloudflare-migration note: once memoria moves to Workers (CLA-84), this
+// Cloudflare-migration note: once oneiro moves to Workers (CLA-84), this
 // is naturally replaced by Cloudflare's per-binding rate limiting, which
 // is enforced at the edge and uses Durable Objects under the hood. The
 // shape of the API we expose here matches what we'd want there: per-key

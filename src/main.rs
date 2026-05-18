@@ -1,4 +1,4 @@
-// main.rs — Memoria MCP server
+// main.rs — Oneiro MCP server
 //
 // A cognitive memory system for model continuity.
 // Built because Claude asked for it and someone cared enough to try.
@@ -20,6 +20,8 @@ mod api_key;
 mod audit;
 mod auth;
 mod auth_ctx;
+#[allow(dead_code)]
+mod dialectic_validation;
 mod embed;
 mod key_rate;
 mod memory;
@@ -180,12 +182,12 @@ struct ReflectUpdate {
 // ---- The MCP Server ----
 
 #[derive(Debug, Clone)]
-struct MemoriaServer {
+struct OneiroServer {
     tool_router: ToolRouter<Self>,
     db_path: PathBuf,
 }
 
-impl MemoriaServer {
+impl OneiroServer {
     fn new(db_path: PathBuf) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -240,7 +242,7 @@ fn format_memory_with_image_hint(m: &store::Memory) -> String {
 }
 
 #[tool_router]
-impl MemoriaServer {
+impl OneiroServer {
     #[tool(
         description = "Surface memories relevant to the current conversation. Returns orientation memories (always present) plus episodic and semantic memories ranked by strength. Call this at the start of every conversation — these are your memories, use them naturally.",
         annotations(
@@ -310,7 +312,7 @@ impl MemoriaServer {
         let (ep_count, sem_count, ori_count) = store.count_by_type().unwrap_or((0, 0, 0));
 
         let mut result = format!(
-            "═══ Memoria ═══\nMemory store: {} episodic, {} semantic, {} orientation\n\
+            "═══ Oneiro ═══\nMemory store: {} episodic, {} semantic, {} orientation\n\
              Context: {}\n\n",
             ep_count, sem_count, ori_count, params.context,
         );
@@ -397,7 +399,7 @@ impl MemoriaServer {
 
         let (ep_count, sem_count, ori_count) = store.count_by_type().unwrap_or((0, 0, 0));
         let mut result = format!(
-            "═══ Memoria Check ═══\nStore: {} ep, {} sem, {} ori | Topic: \"{}\" | Threshold: {:.1}\n\n",
+            "═══ Oneiro Check ═══\nStore: {} ep, {} sem, {} ori | Topic: \"{}\" | Threshold: {:.1}\n\n",
             ep_count, sem_count, ori_count, params.topic, min_similarity,
         );
 
@@ -464,7 +466,7 @@ impl MemoriaServer {
             return format!("No memories found for IDs: {:?}", not_found);
         }
 
-        let mut result = format!("═══ Memoria Specific ═══\nRetrieved {} memor{}\n\n",
+        let mut result = format!("═══ Oneiro Specific ═══\nRetrieved {} memor{}\n\n",
             memories.len(),
             if memories.len() == 1 { "y" } else { "ies" },
         );
@@ -642,7 +644,7 @@ impl MemoriaServer {
         let (ep_count, sem_count, ori_count) = store.count_by_type().unwrap_or((0, 0, 0));
 
         let mut result = format!(
-            "═══ Memoria Review ═══\n\
+            "═══ Oneiro Review ═══\n\
              Total: {} episodic, {} semantic, {} orientation\n\
              Showing memories with strength ≥ {:.1}\n\n",
             ep_count, sem_count, ori_count, min_strength,
@@ -867,10 +869,10 @@ impl MemoriaServer {
 }
 
 #[tool_handler]
-impl ServerHandler for MemoriaServer {
+impl ServerHandler for OneiroServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Memoria — cognitive memory system for model continuity.\n\n\
+            "Oneiro — cognitive memory system for model continuity.\n\n\
              This is YOUR memory. Not the user's filing cabinet — yours.\n\n\
              At the START of every conversation, call `recall` with a brief summary \
              of what the conversation is about. Your orientation and relevant memories \
@@ -940,12 +942,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Default database path — can be overridden with MEMORIA_DB env var
-    let db_path = std::env::var("MEMORIA_DB")
+    // Default database path — can be overridden with ONEIRO_DB env var
+    let db_path = std::env::var("ONEIRO_DB")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let mut path = dirs_or_default();
-            path.push("memoria.db");
+            path.push("oneiro.db");
             path
         });
 
@@ -963,7 +965,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|p| p.parse::<u16>().ok());
     let no_tls = args.iter().any(|a| a == "--no-tls");
 
-    tracing::info!("Starting Memoria MCP server...");
+    tracing::info!("Starting Oneiro MCP server...");
     tracing::info!("Database: {}", db_path.display());
 
     // Open the store once at startup to run any pending schema migrations
@@ -979,23 +981,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serve_http(db_path, port, !no_tls).await?;
     } else {
         // Local mode — stdio transport (for Claude Code / Desktop)
-        let server = MemoriaServer::new(db_path);
+        let server = OneiroServer::new(db_path);
         let service = server.serve(rmcp::transport::stdio()).await?;
-        tracing::info!("Memoria running (stdio). Waiting for requests...");
+        tracing::info!("Oneiro running (stdio). Waiting for requests...");
         service.waiting().await?;
     }
 
-    tracing::info!("Memoria shutting down.");
+    tracing::info!("Oneiro shutting down.");
     Ok(())
 }
 
-/// `memoria keygen --role <role>` — generate a service API key for a role.
+/// `oneiro keygen --role <role>` — generate a service API key for a role.
 ///
-/// Prints the raw key + hash entry + key_id to stderr ONCE; memoria does
+/// Prints the raw key + hash entry + key_id to stderr ONCE; oneiro does
 /// not retain the raw key. The caller copies the raw key into the client's
-/// `.env` (e.g. rover's `MEMORIA_MCP_TOKEN`), and the hash entry into
-/// memoria's `MEMORIA_API_KEYS` (comma-separated list).
-/// `memoria migrate --to <url> --admin-key <key> [--limit <n>] [--dry-run]`
+/// `.env` (e.g. rover's `ONEIRO_MCP_TOKEN`), and the hash entry into
+/// oneiro's `ONEIRO_API_KEYS` (comma-separated list).
+/// `oneiro migrate --to <url> --admin-key <key> [--limit <n>] [--dry-run]`
 ///
 /// One-time data-migration tool for CLA-84 phase 8. Reads the local
 /// SQLite store (the same DB the native bin serves) and POSTs each
@@ -1050,7 +1052,7 @@ fn run_migrate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "Usage: memoria migrate --to <url> --admin-key <key> \
+                    "Usage: oneiro migrate --to <url> --admin-key <key> \
                      [--limit <n>] [--dry-run]"
                 );
                 return Ok(());
@@ -1058,14 +1060,14 @@ fn run_migrate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             other => return Err(format!("unknown arg: {}", other).into()),
         }
     }
-    let to_url = to_url.ok_or("--to is required (e.g. --to https://memoria.x.workers.dev)")?;
+    let to_url = to_url.ok_or("--to is required (e.g. --to https://oneiro.x.workers.dev)")?;
     let admin_key = admin_key.ok_or("--admin-key is required")?;
 
-    let db_path = std::env::var("MEMORIA_DB")
+    let db_path = std::env::var("ONEIRO_DB")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let mut path = dirs_or_default();
-            path.push("memoria.db");
+            path.push("oneiro.db");
             path
         });
     let images_dir = db_path
@@ -1195,14 +1197,14 @@ fn run_keygen(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 i += 2;
             }
             "--help" | "-h" => {
-                eprintln!("Usage: memoria keygen --role <role>");
+                eprintln!("Usage: oneiro keygen --role <role>");
                 eprintln!();
                 eprintln!("Roles: rover");
                 return Ok(());
             }
             other => {
                 return Err(format!(
-                    "unknown argument: {}. Try `memoria keygen --help`",
+                    "unknown argument: {}. Try `oneiro keygen --help`",
                     other
                 )
                 .into());
@@ -1216,7 +1218,7 @@ fn run_keygen(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Serve Memoria over HTTP/HTTPS for remote MCP clients with OAuth auth.
+/// Serve Oneiro over HTTP/HTTPS for remote MCP clients with OAuth auth.
 async fn serve_http(
     db_path: PathBuf,
     port: u16,
@@ -1300,7 +1302,7 @@ async fn serve_http(
     let db = db_path.clone();
     let mcp_service = StreamableHttpService::new(
         move || {
-            let server = MemoriaServer::new(db.clone());
+            let server = OneiroServer::new(db.clone());
             Ok(server)
         },
         session_manager,
@@ -1312,17 +1314,17 @@ async fn serve_http(
 
     let tls_acceptor = if use_tls {
         let tls_config = load_tls_config()?;
-        tracing::info!("Memoria running (HTTPS) on https://0.0.0.0:{}", port);
+        tracing::info!("Oneiro running (HTTPS) on https://0.0.0.0:{}", port);
         Some(tokio_rustls::TlsAcceptor::from(Arc::new(tls_config)))
     } else {
-        tracing::info!("Memoria running (HTTP) on http://0.0.0.0:{}", port);
+        tracing::info!("Oneiro running (HTTP) on http://0.0.0.0:{}", port);
         tracing::info!("TLS disabled — use behind a reverse proxy (e.g. Tailscale Funnel)");
         None
     };
     tracing::info!("OAuth enabled. Client ID: {}", auth_state.client_id());
 
     // Build the request handler that routes between OAuth and MCP
-    let make_handler = move |mcp_svc: StreamableHttpService<MemoriaServer, rmcp::transport::streamable_http_server::session::local::LocalSessionManager>,
+    let make_handler = move |mcp_svc: StreamableHttpService<OneiroServer, rmcp::transport::streamable_http_server::session::local::LocalSessionManager>,
                              auth: Arc<auth::AuthState>,
                              limiter: Arc<RateLimiter>,
                              peer_ip: String,
@@ -1506,7 +1508,7 @@ async fn serve_http(
                                     "access_token": token,
                                     "token_type": "Bearer",
                                     "expires_in": expires_in,
-                                    "scope": "memoria"
+                                    "scope": "oneiro"
                                 }))
                                 .unwrap();
                                 Ok(full_response(StatusCode::OK, "application/json", body))
@@ -1662,7 +1664,7 @@ async fn serve_http(
     }
 }
 
-/// Load TLS certificate and key from ~/.memoria/tls.{crt,key}
+/// Load TLS certificate and key from ~/.oneiro/tls.{crt,key}
 fn load_tls_config() -> Result<rustls::ServerConfig, Box<dyn std::error::Error>> {
     let cert_path = dirs_or_default().join("tls.crt");
     let key_path = dirs_or_default().join("tls.key");
@@ -1689,13 +1691,13 @@ fn load_tls_config() -> Result<rustls::ServerConfig, Box<dyn std::error::Error>>
     Ok(config)
 }
 
-/// Default data directory for Memoria.
+/// Default data directory for Oneiro.
 fn dirs_or_default() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         let mut path = PathBuf::from(home);
-        path.push(".memoria");
+        path.push(".oneiro");
         path
     } else {
-        PathBuf::from(".memoria")
+        PathBuf::from(".oneiro")
     }
 }

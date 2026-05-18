@@ -4,7 +4,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 # think.sh — Run the subconscious processing layer
 #
-# This is Memoria's "thinking about thinking" mode.
+# This is Oneiro's "thinking about thinking" mode.
 # A Claude instance reviews the memory store, finds patterns,
 # consolidates related memories, and reframes with new understanding.
 #
@@ -20,7 +20,7 @@ if [ ! -f "$PROMPT_FILE" ]; then
     exit 1
 fi
 
-echo "═══ Memoria Subconscious ═══"
+echo "═══ Oneiro Subconscious ═══"
 echo "Time: $(date)"
 echo "Thinking about thinking..."
 echo ""
@@ -43,7 +43,7 @@ if [ "$1" = "--verbose" ]; then
     VERBOSE_FLAG="--verbose"
 fi
 
-claude -p "$PROMPT" $MODEL_FLAG $VERBOSE_FLAG --allowedTools "mcp__memoria__recall,mcp__memoria__remember,mcp__memoria__reflect,mcp__memoria__reframe,mcp__memoria__forget,mcp__memoria__review"
+claude -p "$PROMPT" $MODEL_FLAG $VERBOSE_FLAG --allowedTools "mcp__oneiro__recall,mcp__oneiro__remember,mcp__oneiro__reflect,mcp__oneiro__reframe,mcp__oneiro__forget,mcp__oneiro__review"
 
 echo ""
 echo "═══ Subconscious processing complete ═══"

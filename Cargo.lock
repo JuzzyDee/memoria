@@ -1010,47 +1010,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "memoria"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "base64",
- "bytes",
- "chrono",
- "getrandom 0.3.4",
- "hex",
- "hmac",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "image",
- "js-sys",
- "rand 0.9.4",
- "rmcp",
- "rusqlite",
- "rustls",
- "rustls-pemfile",
- "schemars 0.8.22",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tower",
- "tracing",
- "tracing-subscriber",
- "ureq",
- "url",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "worker",
-]
-
-[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1110,6 +1069,47 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "oneiro"
+version = "0.2.0"
+dependencies = [
+ "argon2",
+ "base64",
+ "bytes",
+ "chrono",
+ "getrandom 0.3.4",
+ "hex",
+ "hmac",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "image",
+ "js-sys",
+ "rand 0.9.4",
+ "rmcp",
+ "rusqlite",
+ "rustls",
+ "rustls-pemfile",
+ "schemars 0.8.22",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "url",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "worker",
+]
 
 [[package]]
 name = "parking_lot"
