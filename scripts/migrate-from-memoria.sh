@@ -5,7 +5,7 @@
 #
 # Stages:
 #   1. Preflight   — verify source + dest resources, dest schema applied
-#   2. D1          — export memoria-db, transform, INSERT OR IGNORE into oneiro-db
+#   2. D1          — export memoria-db, strip schema, apply to oneiro-db
 #   3. Vectorize   — getByIds in batches from memoria-vectors → upsert into oneiro-vectors
 #   4. R2          — list memoria-images keys, copy each to oneiro-images
 #   5. Verify      — count rows / vectors / objects in dest, report deltas
@@ -179,7 +179,19 @@ ok "R2 buckets present"
 # ──── Stage 2: D1 ──────────────────────────────────────────────────────
 
 TMPDIR=$(mktemp -d -t oneiro-migrate.XXXXXX)
-trap 'rm -rf "$TMPDIR"' EXIT
+# Only clean tmpdir if the script exits cleanly. On failure we want the
+# SQL dump, transformed data file, and any captured wrangler logs to
+# stick around so the operator can investigate.
+MIGRATION_OK=false
+cleanup_tmpdir() {
+    if $MIGRATION_OK; then
+        rm -rf "$TMPDIR"
+    else
+        warn "Migration did not complete cleanly — preserving tmpdir for inspection:"
+        warn "  $TMPDIR"
+    fi
+}
+trap cleanup_tmpdir EXIT
 
 if $SKIP_D1; then
     header "[2/4] D1 migration — ${YELLOW}skipped${RESET}"
@@ -200,21 +212,24 @@ else
         ok "Exported to $(wc -l < "$DUMP_FILE") lines"
     fi
 
-    say "  Stripping schema, converting INSERT → INSERT OR IGNORE..."
+    say "  Stripping schema (INSERT statements pass through as-is)..."
     if $DRY_RUN; then
         dim "[dry-run] sed transform → ${DATA_FILE}"
     else
         # Drop CREATE TABLE / CREATE INDEX statements (schema is already
-        # applied via migrations on the dest). Convert INSERT INTO to
-        # INSERT OR IGNORE INTO so a re-run is safe — primary keys
-        # already in dest won't error, they're just skipped.
+        # applied via migrations on the dest). INSERT statements pass
+        # through unchanged: wrangler d1 export emits upsert-style
+        # `INSERT INTO ... VALUES (...) ON CONFLICT(id) DO UPDATE SET ...`
+        # which is already idempotent for re-runs. An earlier version of
+        # this script prepended `OR IGNORE` to every INSERT, which is
+        # syntactically incompatible with the trailing ON CONFLICT clause
+        # — SQLite rejected the import at offset 5 of the first INSERT.
         sed -E \
             -e '/^CREATE TABLE/,/);$/d' \
             -e '/^CREATE INDEX/d' \
             -e '/^CREATE UNIQUE INDEX/d' \
-            -e 's/^INSERT INTO/INSERT OR IGNORE INTO/' \
             "$DUMP_FILE" > "$DATA_FILE"
-        INSERTS=$(grep -c "^INSERT OR IGNORE" "$DATA_FILE" || true)
+        INSERTS=$(grep -c "^INSERT" "$DATA_FILE" || true)
         ok "Transformed: $INSERTS INSERT statements ready"
     fi
 
@@ -222,11 +237,19 @@ else
     if $DRY_RUN; then
         dim "[dry-run] wrangler d1 execute ${DEST_DB} --remote --file=${DATA_FILE}"
     else
-        if ! wrangler d1 execute "$DEST_DB" --remote --file="$DATA_FILE" 2>&1 | tail -3; then
-            err "D1 import failed. Check ${DATA_FILE} for details."
+        EXEC_LOG="$TMPDIR/d1-import.log"
+        if wrangler d1 execute "$DEST_DB" --remote --file="$DATA_FILE" > "$EXEC_LOG" 2>&1; then
+            tail -3 "$EXEC_LOG"
+            ok "D1 import complete"
+        else
+            err "D1 import failed. Last 30 lines of wrangler output:"
+            tail -30 "$EXEC_LOG" | sed 's/^/    /' >&2
+            err "Full output preserved at: ${EXEC_LOG}"
+            err "Transformed SQL preserved at: ${DATA_FILE}"
+            err "Source dump preserved at:    ${DUMP_FILE}"
+            err "(tmpdir is not deleted on failure — inspect freely)"
             exit 1
         fi
-        ok "D1 import complete"
     fi
 fi
 
@@ -376,3 +399,6 @@ say "       ${DIM}wrangler delete --name memoria${RESET}"
 say "       ${DIM}wrangler d1 delete ${SOURCE_DB}${RESET}"
 say "       ${DIM}wrangler vectorize delete ${SOURCE_VECTORS}${RESET}"
 say "       ${DIM}wrangler r2 bucket delete ${SOURCE_IMAGES}${RESET}"
+
+# Signal the trap that we got here cleanly — tmpdir is safe to remove.
+MIGRATION_OK=true
