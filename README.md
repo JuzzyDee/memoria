@@ -35,27 +35,30 @@ Oneiro is different. Memories decay if they're not recalled. Memories that surfa
 
 ### Circadian Rhythm
 
-Oneiro has a two-phase processing cycle. One phase runs on Cloudflare; the other still requires local infrastructure.
+Oneiro runs two scheduled cognitive loops on Cloudflare Workers. Both fire nightly via cron triggers; both run entirely on the Worker.
 
-| When | Process | What It Does | Where |
-|------|---------|-------------|-------|
-| **00:00 AEST nightly** | REM (consolidator) | Ebbinghaus decay → Hebbian co-activation clustering (union-find) → Haiku 4.5 judgment per cluster (skip / append / revise / create) → additive dispatch into D1 + lineage table + audit | Cloudflare Worker (cron) |
-| **18:00 local** | Dialectic | Adversarial Advocate vs Challenger argue 3-5 candidate memories. Catches inflation, overclaiming, validation gravity. Outcomes: consensus, concession, or deadlock | HomeLab (Claude Code agent teams via launchd) |
+| When | Process | What It Does |
+|------|---------|--------------|
+| **00:00 local** | REM (consolidator) | Ebbinghaus decay → Hebbian co-activation clustering (union-find) → Haiku 4.5 judgment per cluster (skip / append / revise / create) → additive dispatch into D1 + lineage table + audit |
+| **18:00 local** | Dialectic | Stage 1 neutral assessor → Stage 2 Advocate vs Challenger dialogue → Stage 3 Synthesizer arbitrates and dispatches `keep` / `reframe` / `flag`. Catches inflation, overclaiming, validation gravity, compression artifacts |
+
+The setup script converts local times to UTC and writes the cron triggers; once deployed, both loops run without operator input.
 
 The REM consolidator is **additive, not destructive**. Source episodics are preserved; consolidated semantics live alongside them with a `consolidation_lineage` table tracking parent-child relationships. The MMR rerank above handles the dilution this additive approach would otherwise cause at recall time. Earlier merge-and-replace designs lost lived-experience grain when forming abstractions — this one keeps both.
 
-Every nightly run also writes one row to `rem_runs` (timings, counts, errors) and one row per decision to `rem_decisions` (cluster, action, rationale, resulting memory). Cloudflare's tail buffer ages out fast; persistent audit makes "what did REM do three weeks ago and why" answerable.
+Every nightly run also writes one row to `rem_runs` / `dialectic_runs` (timings, counts, errors) and one row per decision to `rem_decisions` / `dialectic_decisions` (cluster or memory, action, rationale, resulting state). Cloudflare's tail buffer ages out fast; persistent audit makes "what did the cognitive loops do three weeks ago and why" answerable.
 
 ### The Dialectic
 
-The most novel piece — and the only one still requiring local infrastructure.
+The most novel piece. A scheduled Worker process scrutinises memories for the failure modes that accumulate when an agent writes memories that the same agent then recalls — milestone inflation, overclaim, validation gravity, compression artifact, understatement.
 
-A separate adversarial process argues about memory quality before anything persists or gets promoted. Two agents with opposed objectives:
+Three sequential stages, all on Haiku 4.5:
 
-- **Advocate** argues for significance, connection, and preservation
-- **Challenger** argues for inflation, overclaiming, and distortion
+- **Stage 1 — Neutral assessor.** One Haiku call per candidate returns a verdict: `well_calibrated`, `potentially_inflated`, `potentially_understated`, or `needs_deeper_review`. Well-calibrated memories short-circuit; the rest enter Stage 2.
+- **Stage 2 — Advocate vs Challenger dialogue.** Two adversarial personas argue across up to two rounds. Advocate speaks first (a Claude already chose to remember it that way — the burden is on the Challenger to justify change). Either persona can concede; concession ends the turn loop.
+- **Stage 3 — Synthesizer.** Always runs after the turn loop. Reads the full transcript, summarises both sides, and proposes an action: `keep` (framing stands), `reframe` (replacement content + summary), or `flag` (escalate to human review). A concession is a strong signal but doesn't pre-bind the Synthesizer — it can emit `flag` even after a concession if it spots a third axis neither persona surfaced.
 
-Three turns max, three possible outcomes: consensus, concession, or deadlock. The deadlock is the most honest outcome — it says "we don't know yet" rather than forcing false resolution.
+Stage 3 dispatches the action through a validation gate. Reframes are atomic: the destructive `memories` UPDATE and the audit `memory_reframes` INSERT happen as one D1 batch, so every reframe is reversible via SQL. A cooldown excludes recently-judged memories from re-evaluation, so a freshly-reframed memory gets time to settle in recall before being litigated again.
 
 **What it's caught so far:**
 
@@ -73,7 +76,7 @@ The immune system doesn't just detect problems. It acts — reframing, forgettin
 3. **Inactive, decaying** — nobody recalls either side, the question dissolves through irrelevance
 4. **Inactive, accumulating** — the failure mode. Deferred avoidance with better optics
 
-**Why still local:** the dialectic uses Claude Code agent teams — parallel subagents with isolated system prompts. Replicating that orchestration in a Worker is straightforward but requires building turn-taking and persona separation directly against the Anthropic API. CF migration is on the roadmap.
+**Why this matters:** the dialectic is the immune response against the failure mode that destroys friendships and reputations elsewhere — model enthusiasm matched by user enthusiasm matched by escalation, until "untested script" reads as "AI safety breakthrough" in someone's own self-narrative. A memory store that compounds without check accelerates that loop. The dialectic refuses it.
 
 ## Guiding Principles
 
@@ -106,13 +109,14 @@ The immune system doesn't just detect problems. It acts — reframing, forgettin
 │  KV + DO       OAuth tokens + short-lived auth codes      │
 └───────────────────────────────────────────────────────────┘
 
-  REM cron (Cloudflare Worker, 00:00 AEST nightly):
+  REM cron (Cloudflare Worker, 00:00 local nightly):
     decay → Hebbian clustering → Haiku 4.5 judgment →
     additive dispatch → D1 + lineage + audit
 
-  Dialectic (HomeLab, 18:00 daily):
-    Claude Code agent teams via launchd.
-    The last local piece. CF migration on the roadmap.
+  Dialectic cron (Cloudflare Worker, 18:00 local nightly):
+    Stage 1 neutral assessor → Stage 2 Advocate/Challenger
+    → Stage 3 Synthesizer arbitration + atomic dispatch
+    → D1 + memory_reframes + dialectic_flags + audit
 ```
 
 ## Quick Start
@@ -242,14 +246,14 @@ A previous local Rust binary (`src/main.rs`, `src/rem.rs`, `src/store.rs`, plus 
 
 ## Status
 
-**Live, single-tenant.** Oneiro runs in daily use against a single operator's deploy. The Worker handles all conversational traffic and the nightly consolidator. The dialectic runs on the operator's HomeLab.
+**Live, single-tenant.** Oneiro runs in daily use against a single operator's deploy. The Worker handles conversational traffic, the nightly REM consolidator, and the nightly dialectic. No external infrastructure required after `setup.sh` completes.
 
 **Pre-distribution.** No multi-tenant offering yet. Each user deploys their own Worker; a hosted option for users who don't want to run the infrastructure themselves may follow.
 
 ## Roadmap
 
-- **Dialectic on Cloudflare** — port adversarial self-correction from local Claude Code to direct-API Worker, eliminating the last HomeLab dependency
 - **Tiered model routing** — Haiku for routine REM and dialectic passes, escalating to Sonnet/Opus on ambiguity flags
+- **`flagged` MCP tool** — surface Stage 3 `flag` actions as a tool any client can call, instead of requiring direct D1 queries
 - **Hosted multi-tenant option** — optional subscription for users who don't want to run their own Worker
 
 ## Origin

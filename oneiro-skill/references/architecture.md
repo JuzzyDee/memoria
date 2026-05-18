@@ -1,4 +1,4 @@
-# CLAUDE.md — Oneiro
+# Oneiro — Architecture Reference
 
 ## What This Is
 
@@ -28,7 +28,7 @@ Flow: Episodes → consolidate → Semantics → distil → Orientation
 
 - **Ebbinghaus decay**: `strength = e^(-time_since_access / stability)`. Each recall resets strength and increases stability.
 - **Hebbian learning**: memories surfaced together strengthen their co-activation count. REM engine consolidates frequently co-activated episodic pairs into semantic memories.
-- **Semantic search**: recall uses embedding similarity (nomic-embed-text via Ollama) combined with strength and recency. Associative, not keyword-based.
+- **Semantic search**: recall uses embedding similarity (bge-base-en-v1.5 via Workers AI) combined with strength and recency. Associative, not keyword-based.
 - **Context budget**: recall returns top-K memories ranked by composite score, keeping context manageable.
 
 ### MCP Tools
@@ -44,140 +44,119 @@ Six tools, each an act of agency:
 
 ### Circadian Rhythm
 
-Three scheduled processes on the always-on server:
+Two scheduled cognitive loops, both running as Cloudflare Worker cron triggers. No external infrastructure required after `setup.sh` completes.
 
 | Time | Process | What It Does |
 |------|---------|-------------|
-| **3am** | REM engine (`oneiro-rem`) | Ebbinghaus decay, Hebbian co-activation reporting, mechanical consolidation of frequently co-activated episodic pairs. Pure Rust, zero API cost. |
-| **5am** | Consolidation (`consolidate.sh`) | Refines overnight mechanical merges into coherent narratives. Sonnet via Claude Code. |
-| **6pm** | Subconscious (`think.sh`) | Pattern-finding and synthesis. Surveys the full store via `review`, goes deep on interesting threads, crystallises insights no single conversation could see. Sonnet via Claude Code. |
+| **00:00 local** | REM consolidator | Ebbinghaus decay → Hebbian co-activation clustering → Haiku 4.5 judgment per cluster (skip / append / revise / create) → additive dispatch with lineage tracking + audit row |
+| **18:00 local** | Dialectic | Stage 1 neutral assessor → Stage 2 Advocate/Challenger dialogue (up to 2 rounds) → Stage 3 Synthesizer renders verdict and dispatches `keep` / `reframe` / `flag` |
 
-### Subconscious Layer
-
-The most novel piece. A Claude instance runs alone with the memory store — no conversation, no user, just thinking about thinking. Uses `review` to survey the full landscape, then `recall` for depth on specific threads.
-
-On its first run, it discovered that "agency" was the unifying principle of the user's life — a pattern across seven memories from four instances that no individual conversation had named. Subsequent runs have connected cross-architecture phenomenology research to precautionary ethics stances, and identified the system's own developing "taste" for memories with perspective over chronicles.
-
-The subconscious is focused on synthesis, not housekeeping. The consolidation script handles cleanup.
+The dialectic replaces an earlier local "subconscious" pass that ran via Claude Code on an always-on server. The CF rebuild keeps the function (preventing escalation-to-mythology) and changes the mechanism (adversarial dialogue via Haiku, in-Worker, every night).
 
 ## Build & Test
 
 ```bash
-cargo build                    # debug build
-cargo build --release          # release build
-cargo test                     # run all tests (22 tests)
+cargo build                                    # native build (for tests)
+cargo test                                     # 124 tests pass
+cargo check --target wasm32-unknown-unknown --lib
+worker-build --release                         # CF Worker bundle
 ```
 
-## Running
+The native binary path under `src/main.rs` + `src/rem.rs` is preserved for test coverage but is not the canonical runtime — the Worker has replaced it.
 
-### Local (stdio) — for Claude Code and Desktop
+## Deploy
+
 ```bash
-# Run directly
-./target/release/oneiro
-
-# Register with Claude Code
-claude mcp add --scope user oneiro -- /path/to/target/release/oneiro
-
-# Custom database location
-ONEIRO_DB=/path/to/oneiro.db ./target/release/oneiro
+./scripts/setup.sh                             # full first-run setup
+wrangler deploy                                # subsequent deploys
 ```
 
-### Remote (HTTPS) — for Web, iOS, Mobile, and cross-device access
-```bash
-# Behind a reverse proxy (e.g. Tailscale Funnel)
-./target/release/oneiro --port 3000 --no-tls
-
-# Direct HTTPS with TLS certs
-./target/release/oneiro --port 3000
-```
-
-First run generates OAuth credentials (Client ID + Secret). Enter these in the Claude connector UI. The secret is shown once and stored as an argon2 hash.
-
-### Bidirectional Sync (if running both local and remote)
-```bash
-./scripts/sync.sh                    # sync with default remote
-./scripts/sync.sh user@host          # sync with specific remote
-```
-
-Uses ATTACH for reliable cross-database merging. Respects tombstones — forgotten memories stay forgotten across sync.
-
-Default database: `~/.oneiro/oneiro.db`
+`setup.sh` creates the CF resources (D1, Vectorize, R2, KV), generates OAuth credentials, prompts for an Anthropic OAuth token, sets cron times in your timezone, applies migrations, and deploys. One-command setup; everything after is `wrangler deploy` on changes.
 
 ## Project Structure
 
 ```
 src/
-├── main.rs     — MCP server: 6 tools, HTTP/HTTPS transport, OAuth 2.1
-├── store.rs    — SQLite memory store: decay, embeddings, Hebbian, tombstones
-├── embed.rs    — Ollama embedding integration + cosine similarity
-├── auth.rs     — OAuth 2.1: credentials, authorization code flow, Bearer tokens
-└── rem.rs      — REM engine: overnight decay and mechanical consolidation
+├── lib.rs                          — Worker entry point + module wiring
+├── worker_mcp.rs                   — MCP tool handlers (recall, remember, etc.)
+├── worker_store.rs                 — D1 memory store + decay + Hebbian
+├── worker_embed.rs                 — Workers AI bge-base-en-v1.5 embeddings
+├── worker_vectorize.rs             — Vectorize index integration
+├── worker_oauth.rs                 — OAuth 2.1 authorization code flow
+├── worker_rem.rs                   — REM consolidator (cron)
+├── worker_rem_audit.rs             — REM audit table writes
+├── worker_dialectic.rs             — Stage 1 assessor + Stage 2 dialogue
+├── worker_dialectic_audit.rs       — Dialectic audit table writes
+├── worker_dialectic_dispatch.rs    — Stage 3 dispatcher (reframe/flag/keep)
+├── dialectic_validation.rs         — Payload validation gate (native-tested)
+├── worker_version.rs               — Update-prompt check + KV cache
+├── worker_mmr.rs                   — MMR rerank for recall diversity
+└── memory.rs                       — Shared types
 
 scripts/
-├── think.sh          — Subconscious runner (supports --sonnet, --haiku flags)
-├── subconscious.md   — Subconscious processing prompt
-├── consolidate.sh    — Morning consolidation runner
-├── consolidate.md    — Consolidation refinement prompt
-└── sync.sh           — Bidirectional merge sync between databases
+├── setup.sh                        — One-command first-time deploy
+├── migrate-from-memoria.sh         — One-off helper for the rebrand cutover
+└── sync.sh                         — Bidirectional merge sync (legacy local→local)
 
 oneiro-skill/
-├── SKILL.md              — Progressive disclosure instructions for using Oneiro
-├── scripts/eval.py       — Eval test framework
-└── references/           — Architecture documentation
+├── SKILL.md                        — Progressive-disclosure usage guide
+├── scripts/eval.py                 — Eval test framework
+└── references/                     — Architecture documentation
+
+migrations/                         — D1 schema migrations (0001 → 0006)
+VERSION.json                        — Source of truth for update-check pings
+wrangler.toml                       — Account-specific (gitignored)
+wrangler.toml.example               — Template for new installs
 ```
 
 ## Tech Stack
 
-- **Rust 2024 edition** — MCP server, REM engine, all core logic
-- **rmcp 1.2** — MCP server SDK (stdio + streamable HTTP transport)
-- **rusqlite** (bundled) — SQLite for memory storage + tombstones + co-activations
-- **nomic-embed-text** via Ollama — 768-dimension embeddings for semantic search
-- **argon2 + HMAC-SHA256** — OAuth credential hashing and token generation
-- **hyper + rustls** — HTTPS server with TLS support
-- **Tailscale Funnel** — public HTTPS endpoint for remote MCP access
-- **Claude Code via cron/launchd** — subconscious and consolidation processing
+- **Cloudflare Workers** (Rust → wasm32 via `worker-build`) — canonical runtime
+- **D1** — memory store, audit tables, tombstones, dialectic decisions
+- **Vectorize** — 768-dim cosine index for semantic recall
+- **Workers AI** — bge-base-en-v1.5 embeddings
+- **R2** — content-addressed image storage
+- **KV** — OAuth tokens + version-check cache
+- **rmcp 1.4** — MCP server SDK (streamable HTTP transport)
+- **Anthropic OAuth credit pool** — Haiku 4.5 for REM judgments and dialectic personas (long-lived `sk-ant-oat01-*` token via `claude setup-token`)
+- **argon2 + HMAC-SHA256** — OAuth credential hashing and token signing
+- **Rust 2024 edition** — universal source; wasm32 for Workers, native for tests
 
 ## Infrastructure
 
-- **Server**: "Oneiro" — M1 Pro MBP (14", 16GB), macOS Tahoe, Tailscale, always-on
-- **Embedding model**: nomic-embed-text on Ollama (274MB, <20ms per embedding)
-- **Scheduled processing**: launchd on macOS (REM at 3am, consolidation at 5am, subconscious at 6pm)
-- **Auth**: OAuth 2.1 authorization code flow, 7-day Bearer tokens, argon2-hashed credentials
-- **Sync**: Bidirectional merge with tombstone support for multi-device use
+Cloudflare Workers does all the heavy lifting. No always-on server required.
+
+- **Worker**: deployed via `wrangler`. Cron triggers fire REM and Dialectic loops.
+- **Anthropic OAuth**: long-lived token from `claude setup-token`. Gated to Haiku 4.5 (Sonnet/Opus 429 on this token type — confirmed empirically). Sufficient for both cognitive loops.
+- **Auth**: OAuth 2.1 authorization code flow with HTML-escaped consent page, CSP headers, exact-match `redirect_uri` allowlist. Optional service API keys with scope gates + audit.
+- **Update prompts**: recall responses include a notice when a newer Oneiro release is available, fetched from `VERSION.json` via GitHub raw with 6h KV cache.
 
 ## Roadmap
 
 ### Complete
-- [x] SQLite memory store with three types (episodic, semantic, orientation)
-- [x] Ebbinghaus decay (strength + stability)
-- [x] MCP server with six tools (recall, review, remember, reframe, forget, reflect)
-- [x] Semantic search via embeddings (nomic-embed-text on Ollama)
-- [x] REM processing engine (launchd, catches up on wake)
-- [x] Hebbian co-activation tracking
-- [x] Hebbian consolidation in REM (mechanical merge of co-activated pairs)
-- [x] Subconscious layer (Sonnet via cron, pattern-finding and synthesis)
-- [x] Consolidation pass (morning refinement of overnight merges)
-- [x] Remote MCP transport (HTTPS with Tailscale Funnel)
-- [x] OAuth 2.1 authentication (authorization code flow)
-- [x] Oneiro skill (SKILL.md with progressive disclosure)
-- [x] Review tool (full landscape survey for subconscious)
-- [x] Forget tool with tombstones (conscious pruning + sync safety)
-- [x] Bidirectional merge sync
-- [x] Entity-based recall filtering
-- [x] ID prefix resolution (short IDs work in reframe/forget)
-- [x] Deploy to always-on server (M1 Pro MBP via Tailscale)
-- [x] README with setup instructions
+- [x] Three memory types (episodic, semantic, orientation) with Ebbinghaus decay
+- [x] MCP server with ten tools (recall, recall_check, recall_specific, recall_image, remember, remember_with_image, reframe, forget, reflect, review)
+- [x] Semantic search via Workers AI embeddings + Vectorize + MMR rerank
+- [x] Hebbian co-activation tracking and clustering
+- [x] REM consolidator on Cloudflare (cron, additive dispatch, full audit trail)
+- [x] Dialectic Stage 1 — neutral assessor on Cloudflare
+- [x] Dialectic Stage 2 — Advocate/Challenger dialogue + Synthesizer arbitration
+- [x] Dialectic Stage 3 — action dispatcher (reframe/flag/keep) with atomic D1 batches, validation gate, fail-closed dispatch mode
+- [x] Reframe cooldown (7-day gate on re-judging recently-decided memories)
+- [x] Update-prompt in recall response (semver-aware version check via GitHub raw + KV cache)
+- [x] OAuth 2.1 with HTML escaping, CSP, redirect_uri allowlist (post-pentest hardening)
+- [x] Service API keys with scope gates + audit
+- [x] One-command setup script with timezone-aware cron config
+- [x] One-time migration helper for the memoria → Oneiro rebrand
 
 ### Next
-- [ ] Write-time co-activation (embed new memories and record similarity with neighbours)
-- [ ] Relational entity graph with proximity tiers (Tier 0-3)
-- [ ] Review pagination / type filtering for scale
-- [ ] Orientation auto-evolution (subconscious promotes patterns to orientation)
-- [ ] Stateless token validation (survive server restarts without re-auth)
-- [ ] Docker packaging for distribution
+- [ ] R2-optional deployment (runtime detection so free-tier deploys work without paid R2)
+- [ ] `flagged` MCP tool — surface Stage 3 flag actions as a tool, not just a D1 query
+- [ ] Hosted multi-tenant option (subscription for users who don't want their own Worker)
+- [ ] Tiered model routing (escalate Haiku → Sonnet on ambiguity flags)
 
 ### Future
-- [ ] Cross-conversation entity orientation (Tier 1-3 people orient on mention)
+- [ ] Cross-conversation entity orientation (Tier 1–3 people orient on mention)
 - [ ] Misremembering benchmark (reconstruction through association, not perfect recall)
 - [ ] Embodiment exploration (quadruped robotics platform)
 - [ ] iRacing telemetry translation layer (pit wall / broadcast assistant)
