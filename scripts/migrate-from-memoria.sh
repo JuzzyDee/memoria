@@ -327,31 +327,43 @@ else
                 [ -n "$id" ] && IDS_ARR+=("$id")
             done < "$TMPDIR/batch.txt"
 
-            # Get vectors from source as JSON. wrangler emits a WARNING
-            # (yellow triangle ▲) and a non-zero exit code when the
-            # batch contains any IDs that don't have vectors — even if
-            # the rest of the batch returned valid data on stdout.
-            # Treating that exit as fatal would skip whole batches over
-            # one or two missing vectors. Instead: capture stdout to a
-            # file (variable expansion mangles ~80KB JSON with embedded
-            # special chars), try to parse, use what's there.
-            VEC_OUT="$TMPDIR/vec-batch-${BATCH}.json"
+            # Get vectors from source. wrangler dumps a decorative banner
+            # to stdout BEFORE the JSON payload:
+            #
+            #      ⛅️ wrangler 4.90.1 (update available ...)
+            #     ─────────────────────────────────────────
+            #     📋 Fetching vectors...
+            #     [{"id":"...","values":[...]}]
+            #
+            # jq can't parse from byte 0 because of the emoji prefix, so
+            # we sed everything before the first line starting with `[`
+            # out before piping to jq. The wrangler banner appears on
+            # stdout (not stderr — verified empirically) so we can't
+            # filter via 2>/dev/null.
+            #
+            # wrangler also emits a WARNING + non-zero exit when any ID
+            # in the batch lacks a vector. Capture stdout regardless of
+            # exit code, parse what's there. Vectors that exist land;
+            # missing IDs quietly skip.
+            VEC_OUT="$TMPDIR/vec-batch-${BATCH}.raw"
+            VEC_JSON="$TMPDIR/vec-batch-${BATCH}.json"
             VEC_ERR="$TMPDIR/vec-batch-${BATCH}.err"
             wrangler vectorize get-vectors "$SOURCE_VECTORS" --ids "${IDS_ARR[@]}" \
                 > "$VEC_OUT" 2>"$VEC_ERR" || true
 
+            # Strip the wrangler banner — keep from first `[` line onwards.
+            sed -n '/^\[/,$p' "$VEC_OUT" > "$VEC_JSON"
+
             # Transform to NDJSON for vectorize insert. Each line:
             #   {"id":"...","values":[...],"metadata":{...}}
-            # `.[]?` makes jq quietly emit nothing for non-array input.
-            # Capture jq's stderr so a parse failure tells us WHAT it
-            # didn't like — previously we suppressed it with 2>/dev/null
-            # and got a useless "not parseable" warning.
+            # `.[]?` is tolerant of empty input. jq's stderr is captured
+            # so parse failures tell us what jq actually disliked.
             JQ_ERR="$TMPDIR/jq-batch-${BATCH}.err"
-            if ! jq -c '.[]? | {id, values, metadata}' "$VEC_OUT" \
+            if ! jq -c '.[]? | {id, values, metadata}' "$VEC_JSON" \
                 > "$TMPDIR/batch.ndjson" 2>"$JQ_ERR"; then
                 warn "Batch $BATCH: jq failed to parse get-vectors output:"
                 head -5 "$JQ_ERR" | sed 's/^/      [jq] /' >&2
-                head -c 300 "$VEC_OUT" | sed 's/^/      [stdout] /' >&2
+                head -c 300 "$VEC_JSON" | sed 's/^/      [json] /' >&2
                 printf '\n' >&2
                 continue
             fi
