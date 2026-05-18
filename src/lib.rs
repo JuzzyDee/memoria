@@ -32,6 +32,7 @@ mod worker_rem;
 mod worker_rem_audit;
 mod worker_store;
 mod worker_vectorize;
+mod worker_version;
 
 use worker::{event, Context, Env, Method, Request, Response, Result, ScheduleContext, ScheduledEvent};
 

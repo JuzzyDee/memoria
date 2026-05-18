@@ -294,7 +294,7 @@ else
 fi
 ok "Vectorize index: memoria-vectors"
 
-# KV
+# KV — OAuth tokens
 say "  Creating KV namespace 'MEMORIA_TOKENS'..."
 if [ "$DRY_RUN" = true ]; then
     KV_ID="dryrunkv00000000000000000000000000"
@@ -312,6 +312,25 @@ else
     fi
 fi
 ok "KV namespace: MEMORIA_TOKENS (id: ${KV_ID})"
+
+# KV — Version-check cache (CLA-102)
+say "  Creating KV namespace 'MEMORIA_VERSION_CACHE'..."
+if [ "$DRY_RUN" = true ]; then
+    VERSION_KV_ID="dryrunvc00000000000000000000000000"
+    dim "[dry-run] wrangler kv namespace create MEMORIA_VERSION_CACHE"
+else
+    if VKV_OUTPUT=$(wrangler kv namespace create MEMORIA_VERSION_CACHE 2>&1); then
+        VERSION_KV_ID=$(printf '%s' "$VKV_OUTPUT" | grep -oE 'id = "[a-f0-9]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
+    else
+        VERSION_KV_ID=$(awk '/binding = "VERSION_CACHE"/{found=1} found && /^id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
+        warn "KV 'MEMORIA_VERSION_CACHE' may already exist. Using existing id from wrangler.toml: ${VERSION_KV_ID}"
+    fi
+    if [ -z "${VERSION_KV_ID}" ]; then
+        err "Couldn't determine VERSION_CACHE KV id."
+        exit 1
+    fi
+fi
+ok "KV namespace: MEMORIA_VERSION_CACHE (id: ${VERSION_KV_ID})"
 
 # R2
 say "  Creating R2 bucket 'memoria-images'..."
@@ -335,6 +354,7 @@ else
 fi
 toml_set_after_marker 'database_name = "memoria-db"' 'database_id' "$D1_ID"
 toml_set_after_marker 'binding = "TOKENS"' 'id' "$KV_ID"
+toml_set_after_marker 'binding = "VERSION_CACHE"' 'id' "$VERSION_KV_ID"
 [ "$DRY_RUN" != true ] && ok "wrangler.toml patched (backup at wrangler.toml.bak)"
 
 # ──── Step 3: Timezone + cron ────────────────────────────────────────
