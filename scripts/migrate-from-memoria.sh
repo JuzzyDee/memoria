@@ -239,10 +239,20 @@ else
         # (e.g. `INSERT INTO "d1_migrations" (...)`). The `"?` in each
         # pattern makes the leading quote optional so the filter survives
         # whatever convention a future wrangler version settles on.
+        # Also drop PRAGMA / BEGIN / COMMIT lines. wrangler d1 export
+        # opens the dump with `PRAGMA defer_foreign_keys=TRUE;` and may
+        # wrap statements in an explicit transaction; D1's `execute
+        # --file` path doesn't accept PRAGMA statements (the parser
+        # reports a misleading "near ON" syntax error pointing inside
+        # the next statement). wrangler manages its own atomicity for
+        # the import, so dropping these is safe.
         sed -E \
             -e '/^CREATE TABLE/,/);$/d' \
             -e '/^CREATE INDEX/d' \
             -e '/^CREATE UNIQUE INDEX/d' \
+            -e '/^PRAGMA /d' \
+            -e '/^BEGIN[[:space:]]*(TRANSACTION)?;?$/d' \
+            -e '/^COMMIT;?$/d' \
             -e '/^INSERT INTO "?d1_migrations"?/d' \
             -e '/^INSERT INTO "?sqlite_sequence"?/d' \
             -e '/^INSERT INTO "?_cf/d' \
