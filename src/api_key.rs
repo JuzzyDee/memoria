@@ -1,11 +1,11 @@
-// api_key.rs — Service API keys for Memoria
+// api_key.rs — Service API keys for Oneiro
 //
 // Additive to OAuth (auth.rs). User-facing clients (Claude Code, Web, iOS)
 // continue to flow through the OAuth path. Service callers — the rover,
 // future automation — authenticate with static, hashed-at-rest API keys.
 //
 // Security shape (see CLA-86 ticket for the full design rationale):
-//   1. Hashed at rest: memoria stores Argon2 hashes; raw keys exist only
+//   1. Hashed at rest: oneiro stores Argon2 hashes; raw keys exist only
 //      on the client side.
 //   2. Self-identifying format: mk_<role>_<32-byte-random>. The role is
 //      readable from a leaked key at a glance.
@@ -75,14 +75,14 @@ impl Role {
 }
 
 /// A freshly minted API key. The raw key exists only at generation time and
-/// must be captured by the caller — it is never persisted by memoria and
+/// must be captured by the caller — it is never persisted by oneiro and
 /// is mathematically unrecoverable from the hash.
 pub struct GeneratedKey {
     pub role: Role,
     /// The raw key value. Format: `mk_<role>_<32-byte-random>`. Goes in the
-    /// client's environment (e.g. rover's .env as MEMORIA_MCP_TOKEN).
+    /// client's environment (e.g. rover's .env as ONEIRO_MCP_TOKEN).
     pub raw: String,
-    /// Argon2id hash of the raw key. Goes in memoria's MEMORIA_API_KEYS env
+    /// Argon2id hash of the raw key. Goes in oneiro's ONEIRO_API_KEYS env
     /// var alongside the role.
     pub hash: String,
     /// Short stable identifier derived from the raw key (first 8 hex chars
@@ -92,7 +92,7 @@ pub struct GeneratedKey {
 }
 
 impl GeneratedKey {
-    /// Format suitable for the MEMORIA_API_KEYS env var: `<role>:<hash>`.
+    /// Format suitable for the ONEIRO_API_KEYS env var: `<role>:<hash>`.
     /// Multiple entries are joined with `;` (semicolon) — not comma —
     /// because argon2 PHC strings contain commas in their params section.
     pub fn env_entry(&self) -> String {
@@ -100,7 +100,7 @@ impl GeneratedKey {
     }
 }
 
-/// A configured API key entry, as loaded from `MEMORIA_API_KEYS`. Stored
+/// A configured API key entry, as loaded from `ONEIRO_API_KEYS`. Stored
 /// hash only — the raw key is mathematically unrecoverable. Constructed
 /// by `load_from_env`.
 #[derive(Debug, Clone)]
@@ -120,7 +120,7 @@ pub struct ApiKeyAuth {
     pub key_id: String,
 }
 
-/// Load and parse API key entries from the `MEMORIA_API_KEYS` env var.
+/// Load and parse API key entries from the `ONEIRO_API_KEYS` env var.
 ///
 /// Format: **semicolon-separated** list of `<role>:<argon2-hash>` entries.
 /// (Not comma-separated: argon2 PHC hashes contain commas in their params
@@ -132,10 +132,10 @@ pub struct ApiKeyAuth {
 ///
 /// Example:
 /// ```text
-/// MEMORIA_API_KEYS="rover:$argon2id$v=19$m=19456,t=2,p=1$AAA$BBB;rover:$argon2id$v=19$m=19456,t=2,p=1$CCC$DDD"
+/// ONEIRO_API_KEYS="rover:$argon2id$v=19$m=19456,t=2,p=1$AAA$BBB;rover:$argon2id$v=19$m=19456,t=2,p=1$CCC$DDD"
 /// ```
 pub fn load_from_env() -> Result<Vec<ApiKeyEntry>, String> {
-    let raw = std::env::var("MEMORIA_API_KEYS").unwrap_or_default();
+    let raw = std::env::var("ONEIRO_API_KEYS").unwrap_or_default();
     if raw.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -151,18 +151,18 @@ fn parse_entries(raw: &str) -> Result<Vec<ApiKeyEntry>, String> {
         }
         let (role_str, hash) = segment.split_once(':').ok_or_else(|| {
             format!(
-                "MEMORIA_API_KEYS[{}]: malformed entry, expected `<role>:<hash>`",
+                "ONEIRO_API_KEYS[{}]: malformed entry, expected `<role>:<hash>`",
                 idx
             )
         })?;
         let role = Role::from_str(role_str.trim())
-            .ok_or_else(|| format!("MEMORIA_API_KEYS[{}]: unknown role: {}", idx, role_str))?;
+            .ok_or_else(|| format!("ONEIRO_API_KEYS[{}]: unknown role: {}", idx, role_str))?;
         let hash = hash.trim().to_string();
         // Sanity-check the hash parses as a valid PHC string at load time —
         // catches typos and malformed env values before they cause silent
         // verify failures at request time.
         PasswordHash::new(&hash)
-            .map_err(|e| format!("MEMORIA_API_KEYS[{}]: invalid argon2 hash: {}", idx, e))?;
+            .map_err(|e| format!("ONEIRO_API_KEYS[{}]: invalid argon2 hash: {}", idx, e))?;
         entries.push(ApiKeyEntry { role, hash });
     }
     Ok(entries)
@@ -241,7 +241,7 @@ pub fn generate_api_key(role: Role) -> Result<GeneratedKey, String> {
 
 /// Print a newly-generated key to stderr in human-readable form.
 ///
-/// The raw key is shown ONCE here — memoria does not retain it and it
+/// The raw key is shown ONCE here — oneiro does not retain it and it
 /// cannot be recovered from the hash. The caller is responsible for
 /// copying it before this output scrolls off-screen.
 pub fn print_generated_key(key: &GeneratedKey) {
@@ -251,11 +251,11 @@ pub fn print_generated_key(key: &GeneratedKey) {
     eprintln!("  Role:    {}", key.role.as_str());
     eprintln!("  Key ID:  {}", key.key_id);
     eprintln!();
-    eprintln!("  Raw key — paste into the client .env (e.g. as MEMORIA_MCP_TOKEN):");
+    eprintln!("  Raw key — paste into the client .env (e.g. as ONEIRO_MCP_TOKEN):");
     eprintln!();
     eprintln!("    {}", key.raw);
     eprintln!();
-    eprintln!("  Hash entry — add to memoria's MEMORIA_API_KEYS (semicolon-separated):");
+    eprintln!("  Hash entry — add to oneiro's ONEIRO_API_KEYS (semicolon-separated):");
     eprintln!();
     eprintln!("    {}", key.env_entry());
     eprintln!();

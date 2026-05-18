@@ -25,9 +25,9 @@
 //
 // Credential setup is documented in the deploy README — generate with
 // openssl, push via `wrangler secret put`. Three secrets total:
-//   MEMORIA_OAUTH_CLIENT_ID       — public identifier (e.g. memoria-abc123)
-//   MEMORIA_OAUTH_CLIENT_SECRET   — pasted into Anthropic connector config
-//   MEMORIA_TOKEN_SECRET          — not actually used since tokens are
+//   ONEIRO_OAUTH_CLIENT_ID       — public identifier (e.g. oneiro-abc123)
+//   ONEIRO_OAUTH_CLIENT_SECRET   — pasted into Anthropic connector config
+//   ONEIRO_TOKEN_SECRET          — not actually used since tokens are
 //                                   opaque, but reserved for future
 //                                   HMAC-signed variant.
 
@@ -112,31 +112,31 @@ pub fn looks_like_oauth_token(bearer: &str) -> bool {
 
 async fn read_client_creds(env: &Env) -> Result<(String, String)> {
     let client_id = env
-        .secret("MEMORIA_OAUTH_CLIENT_ID")
+        .secret("ONEIRO_OAUTH_CLIENT_ID")
         .map(|s| s.to_string())
-        .map_err(|_| worker::Error::RustError("MEMORIA_OAUTH_CLIENT_ID not set".into()))?;
+        .map_err(|_| worker::Error::RustError("ONEIRO_OAUTH_CLIENT_ID not set".into()))?;
     let client_secret = env
-        .secret("MEMORIA_OAUTH_CLIENT_SECRET")
+        .secret("ONEIRO_OAUTH_CLIENT_SECRET")
         .map(|s| s.to_string())
-        .map_err(|_| worker::Error::RustError("MEMORIA_OAUTH_CLIENT_SECRET not set".into()))?;
+        .map_err(|_| worker::Error::RustError("ONEIRO_OAUTH_CLIENT_SECRET not set".into()))?;
     Ok((client_id, client_secret))
 }
 
-/// Default redirect URIs accepted when `MEMORIA_OAUTH_REDIRECT_URIS` is
+/// Default redirect URIs accepted when `ONEIRO_OAUTH_REDIRECT_URIS` is
 /// unset. Covers the canonical Claude desktop callback scheme. Override
 /// via wrangler secret when deploying behind a different client (or to
 /// add localhost dev callbacks during integration).
 const DEFAULT_ALLOWED_REDIRECT_URIS: &[&str] = &["claude://oauth-callback"];
 
 /// Read the redirect_uri allowlist. Order of precedence:
-///   1. `MEMORIA_OAUTH_REDIRECT_URIS` secret — semicolon-separated, e.g.
+///   1. `ONEIRO_OAUTH_REDIRECT_URIS` secret — semicolon-separated, e.g.
 ///      `claude://oauth-callback;http://localhost:8765/cb`
 ///   2. `DEFAULT_ALLOWED_REDIRECT_URIS` baked-in fallback.
 ///
 /// Env var lets ops adjust the list in seconds without a code deploy if
 /// a client ever changes its callback URI.
 async fn read_allowed_redirect_uris(env: &Env) -> Vec<String> {
-    if let Ok(s) = env.secret("MEMORIA_OAUTH_REDIRECT_URIS") {
+    if let Ok(s) = env.secret("ONEIRO_OAUTH_REDIRECT_URIS") {
         return s
             .to_string()
             .split(';')
@@ -157,7 +157,7 @@ async fn read_allowed_redirect_uris(env: &Env) -> Vec<String> {
 /// server they control because the URI must exactly match a registered
 /// entry.
 ///
-/// Future: when memoria supports multiple clients, this becomes
+/// Future: when oneiro supports multiple clients, this becomes
 /// `is_registered_redirect_uri(client_id, uri)` with per-client storage.
 pub async fn is_registered_redirect_uri(env: &Env, uri: &str) -> bool {
     let allowed = read_allowed_redirect_uris(env).await;
@@ -186,7 +186,7 @@ pub fn protected_resource_metadata(base_url: &str) -> Result<Response> {
     Response::from_json(&json!({
         "resource": base_url,
         "authorization_servers": [base_url],
-        "scopes_supported": ["memoria"],
+        "scopes_supported": ["oneiro"],
     }))
 }
 
@@ -200,7 +200,7 @@ pub fn authorization_server_metadata(base_url: &str) -> Result<Response> {
             "client_secret_basic"
         ],
         "grant_types_supported": ["authorization_code", "client_credentials"],
-        "scopes_supported": ["memoria"],
+        "scopes_supported": ["oneiro"],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"],
     }))
@@ -250,7 +250,7 @@ pub fn render_authorize_page(
         r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>Memoria — Authorize</title>
+    <title>Oneiro — Authorize</title>
     <meta charset="utf-8">
     <style>
         body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 440px;
@@ -274,7 +274,7 @@ pub fn render_authorize_page(
     </style>
 </head>
 <body>
-    <h1>Authorize Claude to access Memoria</h1>
+    <h1>Authorize Claude to access Oneiro</h1>
     <div class="info">
         <p>Client: {client_id_e}</p>
     </div>
@@ -447,7 +447,7 @@ async fn exchange_code(
     }
     // CLA-91 Fix 2 — re-validate the stored redirect_uri against the
     // current allowlist. Guards against the edge case where a pending
-    // code outlives a tightening of MEMORIA_OAUTH_REDIRECT_URIS, or where
+    // code outlives a tightening of ONEIRO_OAUTH_REDIRECT_URIS, or where
     // a pre-Fix-2 deploy created codes with redirect_uris we'd now reject.
     if !is_registered_redirect_uri(env, &pending.redirect_uri).await {
         return token_error("invalid_grant", "redirect_uri not registered", 400);
@@ -470,7 +470,7 @@ async fn issue_token(env: &Env) -> Result<Response> {
         "access_token": token,
         "token_type": "Bearer",
         "expires_in": TOKEN_TTL_SECONDS,
-        "scope": "memoria",
+        "scope": "oneiro",
     }))
 }
 

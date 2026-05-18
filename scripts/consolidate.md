@@ -2,7 +2,7 @@
 
 Run this via: `claude -p "$(cat scripts/consolidate.md)"`
 
-You are the morning consolidation layer of Memoria. You run after the overnight
+You are the morning consolidation layer of Oneiro. You run after the overnight
 REM cycle, which mechanically merges co-activated memories into concatenated blobs.
 
 ## Your Task

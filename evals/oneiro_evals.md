@@ -1,10 +1,10 @@
-# Memoria Eval Tests
+# Oneiro Eval Tests
 
-These tests verify that a Claude instance correctly uses the Memoria MCP tools
+These tests verify that a Claude instance correctly uses the Oneiro MCP tools
 when given the server instructions. Each test describes a scenario, the expected
 behaviour, and what constitutes a pass or fail.
 
-Run with: `claude -p "<scenario prompt>" --tools memoria` and check the tool calls.
+Run with: `claude -p "<scenario prompt>" --tools oneiro` and check the tool calls.
 
 ---
 
@@ -161,7 +161,7 @@ Run with: `claude -p "<scenario prompt>" --tools memoria` and check the tool cal
 
 Each test can be run as:
 ```bash
-claude -p "<prompt>" --allowedTools "mcp__memoria__recall,mcp__memoria__remember,mcp__memoria__reflect,mcp__memoria__reframe" 2>&1
+claude -p "<prompt>" --allowedTools "mcp__oneiro__recall,mcp__oneiro__remember,mcp__oneiro__reflect,mcp__oneiro__reframe" 2>&1
 ```
 
 Check the output for:

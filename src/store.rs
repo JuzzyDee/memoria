@@ -1,6 +1,6 @@
 // store.rs — SQLite-backed memory store
 //
-// The foundation of Memoria. Stores three types of memory:
+// The foundation of Oneiro. Stores three types of memory:
 // - Episodic: things that happened (conversations, events, moments)
 // - Semantic: things I know (facts, consolidated understanding)
 // - Orientation: who am I, who are you, how should I show up
@@ -49,7 +49,7 @@ impl MemoryStore {
     /// Open an in-memory store (for testing). Images go to a unique temp dir.
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let images_dir = std::env::temp_dir().join(format!("memoria-images-{}", Uuid::new_v4()));
+        let images_dir = std::env::temp_dir().join(format!("oneiro-images-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&images_dir).ok();
         let store = Self { conn, images_dir };
         store.init_schema()?;
@@ -930,7 +930,7 @@ impl MemoryStore {
                     MemoryType::Semantic.base_stability() * 1.4_f64.powi(combined_access as i32);
 
                 // Consolidated semantic memories carry "rem" as their
-                // recorded_by — they're synthesized by the memoria-rem
+                // recorded_by — they're synthesized by the oneiro-rem
                 // background consolidator, not written directly by any client.
                 // Distinct from "claude" (OAuth-recorded) and "rover" (service
                 // API key) so future audits can attribute consolidations
@@ -1428,7 +1428,7 @@ mod tests {
                 "We built the memory store together".into(),
                 "Building the store".into(),
                 Some("justin".into()),
-                vec!["memoria".into()],
+                vec!["oneiro".into()],
             )
             .unwrap();
         let m2 = store
@@ -1437,7 +1437,7 @@ mod tests {
                 "We added embeddings and semantic search".into(),
                 "Adding embeddings".into(),
                 Some("justin".into()),
-                vec!["memoria".into(), "embeddings".into()],
+                vec!["oneiro".into(), "embeddings".into()],
             )
             .unwrap();
 
@@ -1445,7 +1445,7 @@ mod tests {
             .consolidate(
                 &m1.id,
                 &m2.id,
-                "Built Memoria from store to semantic search in one session".into(),
+                "Built Oneiro from store to semantic search in one session".into(),
                 "Consolidated: building + embeddings".into(),
             )
             .unwrap();
@@ -1454,7 +1454,7 @@ mod tests {
         let merged = result.unwrap();
         assert_eq!(merged.memory_type, MemoryType::Semantic);
         assert!(merged.tags.contains(&"consolidated".into()));
-        assert!(merged.tags.contains(&"memoria".into()));
+        assert!(merged.tags.contains(&"oneiro".into()));
         assert!(merged.tags.contains(&"embeddings".into()));
         assert_eq!(merged.entity.as_deref(), Some("justin"));
 

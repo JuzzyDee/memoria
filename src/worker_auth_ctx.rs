@@ -62,7 +62,7 @@ pub fn current_recorded_by() -> Option<String> {
         .unwrap_or(None)
 }
 
-/// Cache the parsed API key entries across requests. MEMORIA_API_KEYS is
+/// Cache the parsed API key entries across requests. ONEIRO_API_KEYS is
 /// read from the worker's env (secret) on first access; subsequent
 /// requests reuse the parsed list.
 static API_KEY_ENTRIES: OnceLock<Vec<ApiKeyEntry>> = OnceLock::new();
@@ -71,9 +71,9 @@ fn entries(env: &Env) -> &'static [ApiKeyEntry] {
     API_KEY_ENTRIES.get_or_init(|| {
         // Try secret first (production), then env var (dev).
         let raw = env
-            .secret("MEMORIA_API_KEYS")
+            .secret("ONEIRO_API_KEYS")
             .map(|s| s.to_string())
-            .or_else(|_| env.var("MEMORIA_API_KEYS").map(|v| v.to_string()))
+            .or_else(|_| env.var("ONEIRO_API_KEYS").map(|v| v.to_string()))
             .unwrap_or_default();
         if raw.trim().is_empty() {
             return Vec::new();
@@ -88,7 +88,7 @@ fn entries(env: &Env) -> &'static [ApiKeyEntry] {
 }
 
 /// Inline parse of `<role>:<hash>;<role>:<hash>` — same shape as the
-/// native `MEMORIA_API_KEYS` parser in api_key::load_from_env. Kept here
+/// native `ONEIRO_API_KEYS` parser in api_key::load_from_env. Kept here
 /// (rather than reaching into api_key's private parse_entries) so we
 /// don't have to widen its visibility.
 fn parse_inline(raw: &str) -> Vec<ApiKeyEntry> {
@@ -104,7 +104,7 @@ fn parse_inline(raw: &str) -> Vec<ApiKeyEntry> {
             // with a warning rather than failing all auth.
             if argon2::PasswordHash::new(hash.trim()).is_err() {
                 tracing::warn!(
-                    "MEMORIA_API_KEYS contains an invalid argon2 hash; skipping entry"
+                    "ONEIRO_API_KEYS contains an invalid argon2 hash; skipping entry"
                 );
                 return None;
             }
@@ -119,7 +119,7 @@ fn parse_inline(raw: &str) -> Vec<ApiKeyEntry> {
 /// Validate a Bearer token. Two paths:
 ///   1. OAuth — `mem_<hex>` format, looked up in KV.
 ///   2. Service API key — `mk_<role>_<rand>` format, argon2-verified
-///      against MEMORIA_API_KEYS.
+///      against ONEIRO_API_KEYS.
 /// The OAuth check is async (KV lookup); the API key check is sync.
 pub async fn validate_bearer(env: &Env, bearer: &str) -> Option<AuthCtx> {
     if crate::worker_oauth::looks_like_oauth_token(bearer) {

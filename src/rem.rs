@@ -1,7 +1,7 @@
 #![allow(dead_code)] // embed module is shared with MCP server — not all functions used here
 // rem.rs — REM processing engine
 //
-// The overnight maintenance cycle for Memoria. Named after the sleep stage
+// The overnight maintenance cycle for Oneiro. Named after the sleep stage
 // where the brain consolidates memories — replaying, reorganising, pruning.
 //
 // This binary runs via cron, does its work, and exits. No server, no API
@@ -18,7 +18,7 @@
 // These modules are referenced transitively by store::init_schema —
 // store.rs runs `crate::audit::SCHEMA_SQL` to provision the CLA-86
 // audit table, audit.rs uses `crate::api_key::Role`, and store re-exports
-// types from `crate::memory`. memoria-rem doesn't otherwise touch auth
+// types from `crate::memory`. oneiro-rem doesn't otherwise touch auth
 // or audit logic itself.
 mod api_key;
 mod audit;
@@ -31,11 +31,11 @@ use std::path::PathBuf;
 use store::MemoryStore;
 
 fn main() {
-    let db_path = std::env::var("MEMORIA_DB")
+    let db_path = std::env::var("ONEIRO_DB")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let mut path = dirs_or_default();
-            path.push("memoria.db");
+            path.push("oneiro.db");
             path
         });
 
@@ -47,7 +47,7 @@ fn main() {
         std::process::exit(0);
     }
 
-    println!("═══ Memoria REM Processing ═══");
+    println!("═══ Oneiro REM Processing ═══");
     println!("Database: {}", db_path.display());
     println!(
         "Time: {}",
@@ -185,7 +185,7 @@ fn main() {
     // Merge memories that have been co-activated enough times.
     // The REM engine does mechanical merging (concatenation with markers).
     // The subconscious layer refines these into coherent narratives later.
-    let consolidation_threshold: u32 = std::env::var("MEMORIA_CONSOLIDATION_THRESHOLD")
+    let consolidation_threshold: u32 = std::env::var("ONEIRO_CONSOLIDATION_THRESHOLD")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(5);
@@ -288,13 +288,13 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Default data directory for Memoria.
+/// Default data directory for Oneiro.
 fn dirs_or_default() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         let mut path = PathBuf::from(home);
-        path.push(".memoria");
+        path.push(".oneiro");
         path
     } else {
-        PathBuf::from(".memoria")
+        PathBuf::from(".oneiro")
     }
 }

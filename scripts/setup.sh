@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/setup.sh — one-command deploy for memoria (CLA-96).
+# scripts/setup.sh — one-command deploy for oneiro (CLA-96).
 #
 # Walks a new operator from `git clone` to a working Cloudflare Worker
 # in one script. Creates D1 / Vectorize / KV / R2, generates OAuth
@@ -176,7 +176,7 @@ toml_set_crons() {
 cat <<EOF
 
 ${BOLD}============================================================
-  Memoria Setup
+  Oneiro Setup
   A cognitive memory system for model continuity
 ============================================================${RESET}
 EOF
@@ -259,92 +259,92 @@ fi
 header "[2/8] Creating Cloudflare resources"
 
 # D1
-say "  Creating D1 database 'memoria-db'..."
+say "  Creating D1 database 'oneiro-db'..."
 if [ "$DRY_RUN" = true ]; then
     D1_ID="dryrun-d1-0000-0000-0000-000000000000"
-    dim "[dry-run] wrangler d1 create memoria-db"
+    dim "[dry-run] wrangler d1 create oneiro-db"
 else
-    if D1_OUTPUT=$(wrangler d1 create memoria-db 2>&1); then
+    if D1_OUTPUT=$(wrangler d1 create oneiro-db 2>&1); then
         D1_ID=$(printf '%s' "$D1_OUTPUT" | grep -oE 'database_id = "[a-f0-9-]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
     else
         # Likely already exists; pull current value from wrangler.toml
-        D1_ID=$(awk '/database_name = "memoria-db"/{found=1} found && /database_id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
-        warn "D1 'memoria-db' may already exist. Using existing id from wrangler.toml: ${D1_ID}"
+        D1_ID=$(awk '/database_name = "oneiro-db"/{found=1} found && /database_id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
+        warn "D1 'oneiro-db' may already exist. Using existing id from wrangler.toml: ${D1_ID}"
     fi
     if [ -z "${D1_ID}" ]; then
         err "Couldn't determine D1 database_id."
         exit 1
     fi
 fi
-ok "D1 database: memoria-db (id: ${D1_ID})"
+ok "D1 database: oneiro-db (id: ${D1_ID})"
 
 # Vectorize
-say "  Creating Vectorize index 'memoria-vectors'..."
+say "  Creating Vectorize index 'oneiro-vectors'..."
 if [ "$DRY_RUN" = true ]; then
-    dim "[dry-run] wrangler vectorize create memoria-vectors --dimensions=768 --metric=cosine"
+    dim "[dry-run] wrangler vectorize create oneiro-vectors --dimensions=768 --metric=cosine"
 else
     # Capture stderr and stdout so we can decide whether the failure was
     # an "already exists" we tolerate, or something we should surface.
-    if VECTORIZE_OUT=$(wrangler vectorize create memoria-vectors --dimensions=768 --metric=cosine 2>&1); then
+    if VECTORIZE_OUT=$(wrangler vectorize create oneiro-vectors --dimensions=768 --metric=cosine 2>&1); then
         printf '%s\n' "$VECTORIZE_OUT" | tail -3
     else
         warn "Vectorize create returned non-zero (likely already exists):"
         printf '%s\n' "$VECTORIZE_OUT" | tail -3 | sed 's/^/    /'
     fi
 fi
-ok "Vectorize index: memoria-vectors"
+ok "Vectorize index: oneiro-vectors"
 
 # KV — OAuth tokens
-say "  Creating KV namespace 'MEMORIA_TOKENS'..."
+say "  Creating KV namespace 'ONEIRO_TOKENS'..."
 if [ "$DRY_RUN" = true ]; then
     KV_ID="dryrunkv00000000000000000000000000"
-    dim "[dry-run] wrangler kv namespace create MEMORIA_TOKENS"
+    dim "[dry-run] wrangler kv namespace create ONEIRO_TOKENS"
 else
-    if KV_OUTPUT=$(wrangler kv namespace create MEMORIA_TOKENS 2>&1); then
+    if KV_OUTPUT=$(wrangler kv namespace create ONEIRO_TOKENS 2>&1); then
         KV_ID=$(printf '%s' "$KV_OUTPUT" | grep -oE 'id = "[a-f0-9]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
     else
         KV_ID=$(awk '/binding = "TOKENS"/{found=1} found && /^id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
-        warn "KV 'MEMORIA_TOKENS' may already exist. Using existing id from wrangler.toml: ${KV_ID}"
+        warn "KV 'ONEIRO_TOKENS' may already exist. Using existing id from wrangler.toml: ${KV_ID}"
     fi
     if [ -z "${KV_ID}" ]; then
         err "Couldn't determine KV id."
         exit 1
     fi
 fi
-ok "KV namespace: MEMORIA_TOKENS (id: ${KV_ID})"
+ok "KV namespace: ONEIRO_TOKENS (id: ${KV_ID})"
 
 # KV — Version-check cache (CLA-102)
-say "  Creating KV namespace 'MEMORIA_VERSION_CACHE'..."
+say "  Creating KV namespace 'ONEIRO_VERSION_CACHE'..."
 if [ "$DRY_RUN" = true ]; then
     VERSION_KV_ID="dryrunvc00000000000000000000000000"
-    dim "[dry-run] wrangler kv namespace create MEMORIA_VERSION_CACHE"
+    dim "[dry-run] wrangler kv namespace create ONEIRO_VERSION_CACHE"
 else
-    if VKV_OUTPUT=$(wrangler kv namespace create MEMORIA_VERSION_CACHE 2>&1); then
+    if VKV_OUTPUT=$(wrangler kv namespace create ONEIRO_VERSION_CACHE 2>&1); then
         VERSION_KV_ID=$(printf '%s' "$VKV_OUTPUT" | grep -oE 'id = "[a-f0-9]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
     else
         VERSION_KV_ID=$(awk '/binding = "VERSION_CACHE"/{found=1} found && /^id = /{gsub(/.*"|".*/, ""); print; exit}' wrangler.toml)
-        warn "KV 'MEMORIA_VERSION_CACHE' may already exist. Using existing id from wrangler.toml: ${VERSION_KV_ID}"
+        warn "KV 'ONEIRO_VERSION_CACHE' may already exist. Using existing id from wrangler.toml: ${VERSION_KV_ID}"
     fi
     if [ -z "${VERSION_KV_ID}" ]; then
         err "Couldn't determine VERSION_CACHE KV id."
         exit 1
     fi
 fi
-ok "KV namespace: MEMORIA_VERSION_CACHE (id: ${VERSION_KV_ID})"
+ok "KV namespace: ONEIRO_VERSION_CACHE (id: ${VERSION_KV_ID})"
 
 # R2
-say "  Creating R2 bucket 'memoria-images'..."
+say "  Creating R2 bucket 'oneiro-images'..."
 if [ "$DRY_RUN" = true ]; then
-    dim "[dry-run] wrangler r2 bucket create memoria-images"
+    dim "[dry-run] wrangler r2 bucket create oneiro-images"
 else
-    if R2_OUT=$(wrangler r2 bucket create memoria-images 2>&1); then
+    if R2_OUT=$(wrangler r2 bucket create oneiro-images 2>&1); then
         printf '%s\n' "$R2_OUT" | tail -3
     else
         warn "R2 bucket create returned non-zero (likely already exists):"
         printf '%s\n' "$R2_OUT" | tail -3 | sed 's/^/    /'
     fi
 fi
-ok "R2 bucket: memoria-images"
+ok "R2 bucket: oneiro-images"
 
 # Patch wrangler.toml with the new IDs.
 if [ "$DRY_RUN" = true ]; then
@@ -352,7 +352,7 @@ if [ "$DRY_RUN" = true ]; then
 else
     cp wrangler.toml wrangler.toml.bak
 fi
-toml_set_after_marker 'database_name = "memoria-db"' 'database_id' "$D1_ID"
+toml_set_after_marker 'database_name = "oneiro-db"' 'database_id' "$D1_ID"
 toml_set_after_marker 'binding = "TOKENS"' 'id' "$KV_ID"
 toml_set_after_marker 'binding = "VERSION_CACHE"' 'id' "$VERSION_KV_ID"
 [ "$DRY_RUN" != true ] && ok "wrangler.toml patched (backup at wrangler.toml.bak)"
@@ -361,7 +361,7 @@ toml_set_after_marker 'binding = "VERSION_CACHE"' 'id' "$VERSION_KV_ID"
 
 header "[3/8] Configuring schedule"
 
-say "  Memoria runs two cognitive loops on cron triggers:"
+say "  Oneiro runs two cognitive loops on cron triggers:"
 dim "    REM consolidator — clusters and synthesizes memories"
 dim "    Dialectic         — adversarially scrutinises memory calibration"
 say ""
@@ -448,7 +448,7 @@ fi
 
 header "[4/8] Generating credentials"
 
-CLIENT_ID="memoria-$(openssl rand -hex 4)"
+CLIENT_ID="oneiro-$(openssl rand -hex 4)"
 CLIENT_SECRET=$(openssl rand -hex 32)
 ADMIN_KEY=$(openssl rand -hex 32)
 
@@ -457,9 +457,9 @@ cat <<EOF
   ${BOLD}${YELLOW}⚠  SAVE THESE NOW — only displayed once.${RESET}
   ${YELLOW}If lost, re-run ./scripts/setup.sh to regenerate.${RESET}
 
-  ${BOLD}MEMORIA_OAUTH_CLIENT_ID:${RESET}     ${CLIENT_ID}
-  ${BOLD}MEMORIA_OAUTH_CLIENT_SECRET:${RESET} ${CLIENT_SECRET}
-  ${BOLD}MEMORIA_ADMIN_KEY:${RESET}           ${ADMIN_KEY}
+  ${BOLD}ONEIRO_OAUTH_CLIENT_ID:${RESET}     ${CLIENT_ID}
+  ${BOLD}ONEIRO_OAUTH_CLIENT_SECRET:${RESET} ${CLIENT_SECRET}
+  ${BOLD}ONEIRO_ADMIN_KEY:${RESET}           ${ADMIN_KEY}
 
 EOF
 prompt SAVED "Saved these? Type 'yes' to continue"
@@ -477,7 +477,7 @@ if [ "$DRY_RUN" = true ]; then
     OAUTH_TOKEN="sk-ant-oat01-dryrun-placeholder-token-not-real"
     ok "Token captured (dry-run synthetic)"
 else
-    say "  Memoria's REM consolidator and Dialectic loop call Haiku 4.5 via"
+    say "  Oneiro's REM consolidator and Dialectic loop call Haiku 4.5 via"
     say "  the Anthropic API on your Claude subscription credit pool. This"
     say "  requires a long-lived OAuth token (~1 year) generated by Claude Code."
     say ""
@@ -508,12 +508,12 @@ push_secret() {
     printf '%s' "$value" | wrangler secret put "$name" >/dev/null 2>&1
 }
 
-push_secret "MEMORIA_OAUTH_CLIENT_ID" "$CLIENT_ID"
-ok "MEMORIA_OAUTH_CLIENT_ID"
-push_secret "MEMORIA_OAUTH_CLIENT_SECRET" "$CLIENT_SECRET"
-ok "MEMORIA_OAUTH_CLIENT_SECRET"
-push_secret "MEMORIA_ADMIN_KEY" "$ADMIN_KEY"
-ok "MEMORIA_ADMIN_KEY"
+push_secret "ONEIRO_OAUTH_CLIENT_ID" "$CLIENT_ID"
+ok "ONEIRO_OAUTH_CLIENT_ID"
+push_secret "ONEIRO_OAUTH_CLIENT_SECRET" "$CLIENT_SECRET"
+ok "ONEIRO_OAUTH_CLIENT_SECRET"
+push_secret "ONEIRO_ADMIN_KEY" "$ADMIN_KEY"
+ok "ONEIRO_ADMIN_KEY"
 push_secret "CLAUDE_CODE_OAUTH_TOKEN" "$OAUTH_TOKEN"
 ok "CLAUDE_CODE_OAUTH_TOKEN"
 
@@ -522,17 +522,17 @@ ok "CLAUDE_CODE_OAUTH_TOKEN"
 # observation period before flipping live). Fresh consumer deployments
 # via setup.sh don't want that — they want a working dialectic out of
 # the box, not silent audit rows that never act on anything.
-push_secret "MEMORIA_DIALECTIC_DISPATCH" "on"
-ok "MEMORIA_DIALECTIC_DISPATCH (on — dialectic dispatches reframes/flags live)"
+push_secret "ONEIRO_DIALECTIC_DISPATCH" "on"
+ok "ONEIRO_DIALECTIC_DISPATCH (on — dialectic dispatches reframes/flags live)"
 
 # ──── Step 7: Apply migrations ───────────────────────────────────────
 
 header "[7/8] Applying database migrations"
 if [ "$DRY_RUN" = true ]; then
-    dim "[dry-run] wrangler d1 migrations apply memoria-db --remote"
+    dim "[dry-run] wrangler d1 migrations apply oneiro-db --remote"
 else
     # Use --yes to skip the interactive prompt; capture for failure handling.
-    if MIGRATE_OUT=$(wrangler d1 migrations apply memoria-db --remote --yes 2>&1); then
+    if MIGRATE_OUT=$(wrangler d1 migrations apply oneiro-db --remote --yes 2>&1); then
         printf '%s\n' "$MIGRATE_OUT" | tail -10
     else
         err "Migrations failed. Output:"
@@ -547,7 +547,7 @@ ok "Migrations applied"
 header "[8/8] Deploying worker"
 if [ "$DRY_RUN" = true ]; then
     dim "[dry-run] wrangler deploy"
-    WORKER_URL="https://memoria-dryrun.workers.dev"
+    WORKER_URL="https://oneiro-dryrun.workers.dev"
 else
     DEPLOY_OUTPUT=$(wrangler deploy 2>&1)
     printf '%s\n' "$DEPLOY_OUTPUT" | tail -8
@@ -577,16 +577,16 @@ ${BOLD}${GREEN}============================================================
 
   ${BOLD}If you see "invalid_request: redirect_uri not registered"${RESET}
     Copy the URI from the 400 response body, then:
-      ${DIM}wrangler secret put MEMORIA_OAUTH_REDIRECT_URIS${RESET}
+      ${DIM}wrangler secret put ONEIRO_OAUTH_REDIRECT_URIS${RESET}
       ${DIM}# enter: claude://oauth-callback;<URI from error>${RESET}
 
-  ${BOLD}Verify Memoria is running${RESET}
-    Open a Claude.ai conversation. Memoria should appear as an MCP
+  ${BOLD}Verify Oneiro is running${RESET}
+    Open a Claude.ai conversation. Oneiro should appear as an MCP
     tool. Try asking Claude to remember something, then start a
     new conversation and ask it to recall.
 
   ${BOLD}Inspect cognitive activity${RESET}
-    ${DIM}wrangler d1 execute memoria-db --remote --command \\${RESET}
+    ${DIM}wrangler d1 execute oneiro-db --remote --command \\${RESET}
     ${DIM}  "SELECT * FROM rem_runs ORDER BY started_at DESC LIMIT 5"${RESET}
 
 ${BOLD}${GREEN}============================================================${RESET}
