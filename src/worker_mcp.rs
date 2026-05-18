@@ -541,6 +541,23 @@ async fn tool_recall(
         out.push_str("No memories yet. This is a fresh start.\n");
     }
 
+    // Update prompt — only surfaces when remote version > running version.
+    // Lives at the bottom of the recall output so it doesn't disrupt the
+    // memory listing's structure but is still visible to the model
+    // reading the response. Fail-soft: any error returns None and we
+    // append nothing. (CLA-102)
+    if let Ok(Some(update)) = crate::worker_version::check_for_update(env).await {
+        out.push_str("\n── Memoria update available ──\n");
+        out.push_str(&format!(
+            "Running {} → latest {}",
+            update.current, update.latest
+        ));
+        if let Some(url) = &update.url {
+            out.push_str(&format!("\nRelease notes: {}", url));
+        }
+        out.push('\n');
+    }
+
     Ok(out)
 }
 

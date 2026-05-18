@@ -67,6 +67,15 @@ binding = "TOKENS"
 id = "CHANGE_ME_AFTER_SETUP"
 
 # ──────────────────────────────────────────────────────────────────────
+# KV — Update-check cache (CLA-102). The recall handler fetches
+# VERSION.json from GitHub raw at most every 6h and caches the result
+# here. Drives the "update available" prompt attached to recall output.
+# ──────────────────────────────────────────────────────────────────────
+[[kv_namespaces]]
+binding = "VERSION_CACHE"
+id = "CHANGE_ME_AFTER_SETUP"
+
+# ──────────────────────────────────────────────────────────────────────
 # Cron triggers — two cognitive loops on different schedules.
 #
 #   REM consolidator (CLA-87)
